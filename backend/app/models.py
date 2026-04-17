@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
-from app.database import Base
+from app.base import Base
 
 
 def _utcnow() -> datetime:

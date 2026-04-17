@@ -1,7 +1,9 @@
 import os
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.base import Base  # noqa: F401 — re-exported for existing importers
 
 # DATABASE_URL must be injected via environment variable (e.g. from .env)
 DATABASE_URL: str = os.environ["DATABASE_URL"]
@@ -9,10 +11,6 @@ DATABASE_URL: str = os.environ["DATABASE_URL"]
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-class Base(DeclarativeBase):
-    """Shared declarative base for all ORM models."""
 
 
 def init_db() -> None:
