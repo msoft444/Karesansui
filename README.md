@@ -54,8 +54,6 @@ python3 -m mlx_lm server --model prism-ml/Ternary-Bonsai-8B-mlx-2bit --port 8000
 
 ## ステップ 2: 環境変数の設定 (Environment Variables)
 
-> **Note (Phase 1 Step 2):** `.env.example` および `docker-compose.yml` は Phase 1 Step 2 で追加されます。現時点では以下の手順は実行できません。追加後に実施してください。
-
 ```bash
 cp .env.example .env
 ```
@@ -67,10 +65,10 @@ cp .env.example .env
 
 ## ステップ 3: Karesansui コンテナの起動 (Boot Karesansui)
 
-> **Note (Phase 1 Step 2):** `docker-compose.yml` および `backend/Dockerfile` は Phase 1 Step 2 で追加されます。現時点では以下の手順は実行できません。
+> **Note:** 現時点では `db`, `redis`, `backend` の 3 サービスが起動します。フロントエンド (`frontend`) は Phase 6 で追加されます。
 
 ```bash
-# Build and start all services (DB, Redis, Backend, Frontend)
+# Build and start all services (DB, Redis, Backend)
 docker compose up --build -d
 ```
 
@@ -88,19 +86,16 @@ docker compose logs -f backend
 
 ## ステップ 4: アクセス (Access)
 
-> **Note (Phase 1 Step 2):** 各サービスは Phase 1 Step 2 のコンテナ構成追加後に利用可能になります。
-
-| サービス | URL |
-|---|---|
-| フロントエンド (管理コンソール) | http://localhost:3000 |
-| バックエンド API (FastAPI Docs) | http://localhost:8001/docs |
-| 推論エンジン (ホスト) | http://localhost:8000/v1 |
+| サービス | URL | 備考 |
+|---|---|---|
+| バックエンド API (FastAPI Docs) | http://localhost:8001/docs | Phase 1 Step 2 〜 |
+| バックエンド ヘルスチェック | http://localhost:8001/health | Phase 1 Step 2 〜 |
+| 推論エンジン (ホスト) | http://localhost:8000/v1 | ホスト側サーバー |
+| フロントエンド (管理コンソール) | http://localhost:3000 | Phase 6 〜 |
 
 ---
 
 ## 環境のクリーンアップ (Cleanup)
-
-> **Note (Phase 1 Step 2):** `docker-compose.yml` は Phase 1 Step 2 で追加されます。現時点では以下のコマンドは実行できません。
 
 ```bash
 # Stop and remove containers, networks, volumes
@@ -126,8 +121,8 @@ Karesansui/
 ├── docs/
 │   ├── requirement_specification.md
 │   └── implementation_guide.md
-├── .env.example          # Environment variable template (added in Phase 1 Step 2)
-├── docker-compose.yml    # Container orchestration (added in Phase 1 Step 2)
+├── .env.example          # Environment variable template
+├── docker-compose.yml    # Container orchestration
 ├── .gitignore
 └── .dockerignore
 ```
