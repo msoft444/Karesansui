@@ -1,0 +1,64 @@
+services:
+
+  # ----------------------------------------------------------
+  # PostgreSQL with pgvector extension
+  # ----------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-karesansui}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-karesansui}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - karesansui_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Redis (task queue broker)
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    networks:
+      - karesansui_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # FastAPI Backend
+  # DooD: mounts /var/run/docker.sock for meta-development
+  # host.docker.internal: routes to Mac host Metal inference API
+  # ----------------------------------------------------------
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://karesansui:changeme@db:5432/karesansui}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_REPO: ${GITHUB_REPO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PORT_PREFIX:-80}01:8000"
+    depends_on:
+      - db
+      - redis
+    networks:
+      - karesansui_net
+    restart: unless-stopped
+
+# ----------------------------------------------------------
+# Named network (isolated per project for multi-instance support)
+# ----------------------------------------------------------
+networks:
+  karesansui_net:
+    driver: bridge
+
+# ----------------------------------------------------------
+# Persistent volumes
+# ----------------------------------------------------------
+volumes:
+  postgres_data:
