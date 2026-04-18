@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import History
 from app.orchestrator.dag_parser import DagNode
+from app.orchestrator.debate_controller import DebateController
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -133,11 +134,37 @@ class OrchestratorManager:
             Mapping of ``task_id`` to the structured result dict.
         """
         for node in nodes:
-            messages = self._build_messages(node, user_query)
-            history_id = self._enqueue_and_wait(node, messages)
-            logger.info(
-                "[manager] task_id=%r completed; history_id=%r", node.task_id, history_id
-            )
+            if node.task_type == "Debate":
+                # Delegate to DebateController for round-robin multi-agent debate.
+                parent_results = self._collect_parent_results(node.parent_ids)
+                controller = DebateController(
+                    model=self._model,
+                    system_prompt_template=self._system_prompt_template,
+                    task_timeout=self._task_timeout,
+                    db_session=self._db_session,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                )
+                final_result, debate_progress = controller.run(
+                    node, parent_results, user_query
+                )
+                # Cache the mediator's final conclusion for child tasks.
+                self._completed_results[node.task_id] = final_result
+                # Persist the debate summary row via the standard _persist path.
+                history_id = self._persist(node, final_result, debate_progress)
+                logger.info(
+                    "[manager] debate task_id=%r completed; history_id=%r",
+                    node.task_id,
+                    history_id,
+                )
+            else:
+                messages = self._build_messages(node, user_query)
+                history_id = self._enqueue_and_wait(node, messages)
+                logger.info(
+                    "[manager] task_id=%r completed; history_id=%r",
+                    node.task_id,
+                    history_id,
+                )
 
         return dict(self._completed_results)
 
