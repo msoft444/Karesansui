@@ -82,6 +82,7 @@ class DebateController:
         db_session: Session | None = None,
         temperature: float = 0.0,
         max_tokens: int = 2048,
+        run_id: str | None = None,
     ) -> None:
         self._model = model
         self._system_prompt_template = system_prompt_template
@@ -89,6 +90,7 @@ class DebateController:
         self._db_session = db_session
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._run_id = run_id
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -524,6 +526,7 @@ class DebateController:
                 **(worker_progress or {}),
             }
             row = History(
+                run_id=self._run_id,
                 task_id=turn_task_id,
                 role=role,
                 result=result,

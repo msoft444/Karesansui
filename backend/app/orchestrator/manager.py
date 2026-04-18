@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from typing import Any
 
 from celery.result import AsyncResult
@@ -133,6 +134,16 @@ class OrchestratorManager:
         dict[str, dict[str, Any]]
             Mapping of ``task_id`` to the structured result dict.
         """
+        # Generate a unique run identifier shared by every History row
+        # produced during this orchestration invocation.  This allows the
+        # frontend DAG visualiser to precisely filter node history rows by
+        # run without relying on time-window heuristics.
+        run_id = uuid.uuid4().hex
+
+        # Persist the Planner DAG topology so the management console can
+        # reconstruct and visualise the full graph for this run.
+        self._persist_planner_dag(nodes, run_id=run_id)
+
         for node in nodes:
             if node.task_type == "Debate":
                 # Delegate to DebateController for round-robin multi-agent debate.
@@ -144,6 +155,7 @@ class OrchestratorManager:
                     db_session=self._db_session,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
+                    run_id=run_id,
                 )
                 final_result, debate_progress = controller.run(
                     node, parent_results, user_query
@@ -151,7 +163,7 @@ class OrchestratorManager:
                 # Cache the mediator's final conclusion for child tasks.
                 self._completed_results[node.task_id] = final_result
                 # Persist the debate summary row via the standard _persist path.
-                history_id = self._persist(node, final_result, debate_progress)
+                history_id = self._persist(node, final_result, debate_progress, run_id=run_id)
                 logger.info(
                     "[manager] debate task_id=%r completed; history_id=%r",
                     node.task_id,
@@ -159,7 +171,7 @@ class OrchestratorManager:
                 )
             else:
                 messages = self._build_messages(node, user_query)
-                history_id = self._enqueue_and_wait(node, messages)
+                history_id = self._enqueue_and_wait(node, messages, run_id=run_id)
                 logger.info(
                     "[manager] task_id=%r completed; history_id=%r",
                     node.task_id,
@@ -171,6 +183,51 @@ class OrchestratorManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _persist_planner_dag(self, nodes: list[DagNode], *, run_id: str) -> str | None:
+        """Write a Planner DAG row to History before task execution begins.
+
+        The row uses ``role='Planner'`` and stores the full DAG topology inside
+        ``result.tasks``.  The management console's DAG visualiser queries for
+        these rows to populate the run selector and reconstruct node graphs.
+        """
+        serialized_tasks = [
+            {
+                "task_id": node.task_id,
+                "task_type": node.task_type,
+                "role": node.role,
+                "participants": node.participants,
+                "mediator": node.mediator,
+                "parent_ids": node.parent_ids,
+                "dynamic_params": node.dynamic_params,
+            }
+            for node in nodes
+        ]
+        close_session = False
+        session: Session = self._db_session  # type: ignore[assignment]
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            row = History(
+                run_id=run_id,
+                task_id=f"planner_run_{run_id}",
+                role="Planner",
+                result={"tasks": serialized_tasks},
+                progress=None,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            logger.info("[manager] persisted Planner DAG; history_id=%r", str(row.id))
+            return str(row.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("[manager] Failed to persist Planner DAG row")
+            session.rollback()
+            return None
+        finally:
+            if close_session:
+                session.close()
 
     def _build_messages(
         self, node: DagNode, user_query: str
@@ -231,7 +288,7 @@ class OrchestratorManager:
         }
 
     def _enqueue_and_wait(
-        self, node: DagNode, messages: list[dict[str, Any]]
+        self, node: DagNode, messages: list[dict[str, Any]], *, run_id: str
     ) -> str | None:
         """Submit *node* to the Celery broker, block until complete, then
         persist the result to the History table.
@@ -267,7 +324,7 @@ class OrchestratorManager:
         self._completed_results[node.task_id] = result_dict
 
         # Persist to History table.
-        history_id = self._persist(node, result_dict, progress_dict)
+        history_id = self._persist(node, result_dict, progress_dict, run_id=run_id)
         return history_id
 
     def _persist(
@@ -275,6 +332,8 @@ class OrchestratorManager:
         node: DagNode,
         result_dict: dict[str, Any],
         progress_dict: dict[str, Any],
+        *,
+        run_id: str,
     ) -> str | None:
         """Write the task outcome to the ``history`` table.
 
@@ -290,6 +349,7 @@ class OrchestratorManager:
         try:
             role = node.role if node.task_type == "Standard" else "Debate_Coordinator"
             row = History(
+                run_id=run_id,
                 task_id=node.task_id,
                 role=role,
                 result=result_dict,

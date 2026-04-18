@@ -65,8 +65,6 @@ cp .env.example .env
 
 ## ステップ 3: Karesansui コンテナの起動 (Boot Karesansui)
 
-> **Note:** 現時点では `db`, `redis`, `backend` の 3 サービスが起動します。フロントエンド (`frontend`) は Phase 6 で追加されます。
-
 ```bash
 # Build and start all services (DB, Redis, Backend)
 docker compose up --build -d
@@ -81,6 +79,33 @@ docker compose ps
 ```bash
 docker compose logs -f backend
 ```
+
+---
+
+## ステップ 3-B: フロントエンドの起動 (Frontend)
+
+> **重要:** Next.js の `rewrites()` はビルド時に評価されます。`npm run build` の **前に** `API_BASE_URL` を設定してください。
+
+```bash
+cd frontend
+
+# Install dependencies (初回のみ)
+npm install
+
+# Build (API_BASE_URL を明示して build)
+API_BASE_URL=http://localhost:8001 npm run build
+
+# Start production server
+npm run start
+```
+
+ローカル開発時は `.env.local` で設定することもできます:
+```bash
+echo 'API_BASE_URL=http://localhost:8001' > frontend/.env.local
+cd frontend && npm run build && npm run start
+```
+
+フロントエンドは `http://localhost:3000` で起動します。
 
 ---
 
