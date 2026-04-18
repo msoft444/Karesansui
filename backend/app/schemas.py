@@ -65,3 +65,34 @@ class SettingResponse(BaseModel):
     key: str
     value: Any
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Debate-node structured-output schemas
+# ---------------------------------------------------------------------------
+
+
+class DebateParticipantResponse(BaseModel):
+    """Structured output for Advocate, Disrupter, and other debate participant agents.
+
+    Used as the ``response_model_class_path`` target in
+    ``app.tasks.run_structured_inference`` during debate rounds.
+    """
+
+    argument: str
+    support_points: list[str]
+
+
+class MediatorResponse(BaseModel):
+    """Structured output for the Mediator agent's per-round consensus evaluation.
+
+    ``consensus_reached`` acts as the termination flag: when True the
+    :class:`~app.orchestrator.debate_controller.DebateController` exits the
+    round-robin loop and forwards ``conclusion`` / ``reasoning`` to child DAG
+    tasks.  The ``consensus_reached`` field is stripped before forwarding so
+    child agents receive only the substantive conclusion.
+    """
+
+    consensus_reached: bool
+    conclusion: str
+    reasoning: str

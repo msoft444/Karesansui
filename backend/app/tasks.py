@@ -98,7 +98,19 @@ def run_structured_inference(
                 timeout=timeout,
             )
         )
-        return result.model_dump()
+        # progress captures the grounds that produced the result:
+        # the full input context (messages) and inference parameters.
+        # This is the agent's "thought process / grounds" as defined by
+        # requirement_specification.md §6.
+        return {
+            "result": result.model_dump(),
+            "progress": {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+        }
 
     # Transient connection failures → retry with exponential backoff
     except RuntimeError as exc:

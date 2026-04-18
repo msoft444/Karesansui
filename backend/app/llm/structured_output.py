@@ -15,13 +15,14 @@ INFERENCE_API_KEY: str = os.environ.get("INFERENCE_API_KEY", "not-required")
 # Default timeout in seconds for a single structured inference request.
 _DEFAULT_TIMEOUT_SECONDS: float = 120.0
 
-# instructor.Mode.TOOLS converts the Pydantic model into an OpenAI tool/function
-# definition and calls the API with `tools=[...]` + `tool_choice` forced to that
-# function.  The server returns a structured `tool_calls[].function.arguments`
-# JSON object, which instructor then validates against the Pydantic schema and
-# retries on mismatch.  This protocol is more broadly supported by OpenAI-compatible
-# servers (including mlx_lm) than `response_format.type=json_schema`, which many
-# local servers accept but do not enforce at the logits level.
+# instructor.Mode.JSON_SCHEMA sends response_format={"type":"json_schema",
+# "json_schema":{"name":...,"schema":...,"strict":True}} so the server is
+# asked to constrain output to the exact Pydantic schema — satisfying the
+# "JSON Schema constraints at the Logits level" requirement
+# (requirement_specification.md §8, implementation_guide.md Phase 4 Step 2).
+# This mode avoids the tool_call protocol entirely, which is necessary because
+# mlx_lm can return multiple tool calls in a single response — a pattern that
+# instructor.Mode.TOOLS rejects with AssertionError.
 _raw_client = openai.AsyncOpenAI(
     base_url=INFERENCE_API_BASE_URL,
     api_key=INFERENCE_API_KEY,
@@ -29,7 +30,7 @@ _raw_client = openai.AsyncOpenAI(
 )
 _client: instructor.AsyncInstructor = instructor.from_openai(
     _raw_client,
-    mode=instructor.Mode.TOOLS,
+    mode=instructor.Mode.JSON_SCHEMA,
 )
 
 T = TypeVar("T", bound=BaseModel)
