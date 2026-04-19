@@ -98,3 +98,43 @@ class MediatorResponse(BaseModel):
     consensus_reached: bool
     conclusion: str
     reasoning: str
+
+
+# ---------------------------------------------------------------------------
+# RoleTemplate schemas
+# ---------------------------------------------------------------------------
+
+
+class RoleTemplateCreate(BaseModel):
+    """Payload for creating a new role template."""
+
+    name: str
+    description: str = ""
+    system_prompt: str = ""
+    tools: list[str] = []
+    default_params: dict[str, Any] = {}
+
+
+class RoleTemplateUpdate(BaseModel):
+    """Partial update payload for an existing role template."""
+
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    default_params: dict[str, Any] | None = None
+
+
+class RoleTemplateResponse(BaseModel):
+    """Full representation of a RoleTemplate record returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    description: str
+    system_prompt: str
+    tools: list[str]
+    default_params: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime

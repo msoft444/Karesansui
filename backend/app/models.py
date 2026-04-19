@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.base import Base
@@ -78,5 +78,40 @@ class KnowledgeChunk(Base):
     created_at = Column(
         DateTime(timezone=True),
         default=_utcnow,
+        nullable=False,
+    )
+
+
+class RoleTemplate(Base):
+    """Predefined agent role templates selectable by the Planner when building a DAG.
+
+    Each template encapsulates a system prompt, an optional list of available
+    tool names, and default dynamic parameters that can be overridden at
+    task-assignment time.
+    """
+
+    __tablename__ = "role_templates"
+    __table_args__ = (UniqueConstraint("name", name="uq_role_templates_name"),)
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    system_prompt = Column(Text, nullable=False, default="")
+    tools = Column(JSONB, nullable=False, default=list)
+    default_params = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
         nullable=False,
     )
