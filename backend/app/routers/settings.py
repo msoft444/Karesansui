@@ -10,7 +10,7 @@ from app.schemas import SettingResponse, SettingUpdate
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-@router.get("/", response_model=List[SettingResponse])
+@router.get("", response_model=List[SettingResponse])
 def list_settings(db: Session = Depends(get_db)):
     """Return all global settings ordered by key."""
     return db.query(GlobalSettings).order_by(GlobalSettings.key).all()

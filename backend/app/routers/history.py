@@ -11,7 +11,7 @@ from app.schemas import HistoryCreate, HistoryResponse, HistoryUpdate
 router = APIRouter(prefix="/history", tags=["history"])
 
 
-@router.get("/", response_model=List[HistoryResponse])
+@router.get("", response_model=List[HistoryResponse])
 def list_history(
     task_id: str | None = None,
     run_id: str | None = None,
@@ -37,7 +37,7 @@ def get_history(history_id: uuid.UUID, db: Session = Depends(get_db)):
     return record
 
 
-@router.post("/", response_model=HistoryResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=HistoryResponse, status_code=status.HTTP_201_CREATED)
 def create_history(payload: HistoryCreate, db: Session = Depends(get_db)):
     """Record a new agent task execution."""
     record = History(**payload.model_dump())

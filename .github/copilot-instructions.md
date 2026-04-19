@@ -37,8 +37,16 @@ When specific commands are entered in this "Karesansui" project, strictly execut
 
 ### `dc` (Dynamic Review)
 - **Role:** Extremely Strict QA Engineer
-- **Task:** Verify actual execution by checking container startup and running test scripts. **[Bugfix Context]: If the previous command was `fix` or its `rr`, strictly simulate and execute the `how to reproduce` steps defined in `bugs.md` to verify the bug is resolved.** Append the results to `review.md`.
-- **File Protection Rule (STRICT):** Similar to `sc`, except for writing to `review.md`, NEVER modify or add any existing source code or files.
+- **Task:** Perform **end-to-end runtime verification** of the actual execution environment. This is NOT a unit-test or API-only check — every service layer touched by the change must be rebuilt, started, and verified through its **final consumer-facing output**. **[Bugfix Context]: If the previous command was `fix` or its `rr`, strictly execute the `how to reproduce` steps defined in `bugs.md` against the live environment to verify the bug is resolved.**
+- **Mandatory Verification Procedure (STRICT):**
+  1. **Clean rebuild:** Rebuild all services affected by the change from the current source tree (e.g., `docker compose up --build`, `npm run build`). Never trust a pre-existing build artifact — stale caches are a common source of false positives.
+  2. **Service startup confirmation:** Start all required services and confirm each one is healthy and accepting connections (health endpoints, process status, logs free of fatal errors).
+  3. **End-to-end consumer-path verification:** For every entry point that an end user or downstream service would access, issue an actual request through the **same path** the real consumer uses and validate that the response is structurally correct (e.g., expected status code, response body contains required content markers, no error traces). If a service returns rendered content, fetch and inspect the **rendered output** — do not assume correctness from upstream layers alone.
+  4. **Functional scenario execution:** Execute the CRUD / workflow scenarios relevant to the change through the consumer-facing path and confirm each operation produces the expected result.
+  5. **Failure evidence:** If any step produces unexpected output, capture the exact error or response excerpt and record it as a REJECTED finding.
+  6. **Faithful reproduction of user reports (STRICT / ANTI-HALLUCINATION):** When the user reports a problem (e.g., "localhost:3000 で白画面"), that report MUST be treated as an **absolute reproduction instruction**. Reproduce the issue using the **exact same URL, hostname, port, path, method, and steps** the user described — NEVER substitute, rewrite, or "normalize" any part of it (e.g., replacing `localhost` with `127.0.0.1`, changing the port, or altering query parameters). Any deviation from the user's literal report constitutes a hallucinated verification and invalidates the entire dc result. If the reported issue cannot be reproduced as described, record that fact explicitly — do not silently verify a different scenario and declare APPROVED.
+- **Append** all results (procedure, observations, verdict) to `review.md`.
+- **File Protection Rule (STRICT):** Except for writing to `review.md`, NEVER modify or add any existing source code or files.
 
 ### `cp` (Commit & Push)
 - **Role:** Release Engineer

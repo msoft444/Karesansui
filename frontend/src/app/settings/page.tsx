@@ -19,7 +19,7 @@ const fetcher = async (url: string) => {
 export default function SettingsPage() {
   // Fetch from /api/settings/ which is proxied by Next.js to the FastAPI backend
   const { data, error, isLoading, mutate } = useSWR<SettingRecord[]>(
-    "/api/settings/",
+    "/api/settings",
     fetcher
   );
 

@@ -8,10 +8,10 @@ from app.database import get_db
 from app.models import RoleTemplate
 from app.schemas import RoleTemplateCreate, RoleTemplateResponse, RoleTemplateUpdate
 
-router = APIRouter(prefix="/api/templates", tags=["templates"])
+router = APIRouter(prefix="/templates", tags=["templates"])
 
 
-@router.get("/", response_model=List[RoleTemplateResponse])
+@router.get("", response_model=List[RoleTemplateResponse])
 def list_templates(db: Session = Depends(get_db)):
     """Return all role templates ordered by name."""
     return db.query(RoleTemplate).order_by(RoleTemplate.name).all()
@@ -28,7 +28,7 @@ def get_template(template_id: uuid.UUID, db: Session = Depends(get_db)):
     return record
 
 
-@router.post("/", response_model=RoleTemplateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=RoleTemplateResponse, status_code=status.HTTP_201_CREATED)
 def create_template(payload: RoleTemplateCreate, db: Session = Depends(get_db)):
     """Create a new role template. Returns 409 if the name already exists."""
     existing = db.query(RoleTemplate).filter(RoleTemplate.name == payload.name).first()

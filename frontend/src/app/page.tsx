@@ -21,7 +21,7 @@ const fetcher = async (url: string) => {
 export default function DashboardPage() {
   // Fetch from /api/history/ which is proxied by Next.js to the FastAPI backend
   const { data, error, isLoading } = useSWR<HistoryRecord[]>(
-    "/api/history/",
+    "/api/history",
     fetcher,
     { refreshInterval: 5000 }
   );
