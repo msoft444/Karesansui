@@ -3,8 +3,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Karesansui",
-  description: "Ternary Bonsai Multi-Agent System Console",
+  title: "枯山水 v1.4.1",
+  description: "枯山水 マルチエージェントシステム コンソール",
 };
 
 const navItems = [
@@ -59,8 +59,8 @@ export default function RootLayout({
         <aside className="w-56 shrink-0 border-r border-gray-800 flex flex-col">
           {/* Branding */}
           <div className="px-5 py-5 border-b border-gray-800">
-            <p className="text-base font-bold text-white tracking-wide">Karesansui</p>
-            <p className="text-xs text-gray-600 mt-0.5">Multi-Agent Console</p>
+            <p className="text-base font-bold text-white tracking-wide">枯山水</p>
+            <p className="text-xs text-gray-600 mt-0.5">マルチエージェントコンソール</p>
           </div>
 
           {/* Navigation */}
@@ -79,7 +79,7 @@ export default function RootLayout({
 
           {/* Footer */}
           <div className="px-5 py-4 border-t border-gray-800">
-            <p className="text-xs text-gray-700">v0.1.0</p>
+            <p className="text-xs text-gray-700">v1.4.1</p>
           </div>
         </aside>
 
