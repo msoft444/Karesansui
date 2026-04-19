@@ -51,7 +51,40 @@ This is required by the requirement specification §7 (Interface Requirements) w
 
 ---
 
-## Bug 3: Missing Agent Service Control and Worker Status Management in Web Console
+## Bug 3: Missing Knowledge Base Manager in Web Console
+
+### Symptom
+The requirement specification §6 (Data, State & Knowledge Management) defines a complete **Knowledge Base Pipeline** for RAG/MCP that includes: PDF upload → TOC-based hierarchical splitting → MarkItDown conversion → vectorization via Sentence-Transformers → storage in pgvector → GitHub repository sync. The requirement specification §7 (Interface Requirements) explicitly mandates a **"Knowledge Base Manager"** section providing:
+> "Management of document upload, hierarchical splitting, MarkItDown conversion, vectorization, and GitHub saving status."
+
+The backend services for this pipeline are already implemented (`document_parser.py`, `vector_store.py`, `github_sync.py`), but:
+- **No upload UI** — there is no web console page or form for users to upload PDF files for processing.
+- **No pipeline status view** — there is no UI showing the progress of splitting, conversion, vectorization, or GitHub sync.
+- **No library management** — there is no interface to browse, search, or delete documents/chunks already registered in the knowledge base or the GitHub repository.
+- **No API endpoints** — there are no REST endpoints to trigger the pipeline or manage uploaded documents from the frontend.
+
+### Expected Behavior
+The management web console should provide a **Knowledge Base Manager** page where users can:
+- **Upload** PDF files via a drag-and-drop or file picker interface.
+- **View pipeline status** — track each uploaded document through the stages: splitting → conversion → vectorization → GitHub sync (with success/failure indicators).
+- **Browse** the knowledge base library: list all processed documents with their hierarchical structure (chapters/sections).
+- **Delete** individual documents or sections from the knowledge base (removing vectors from pgvector and files from the GitHub repository).
+- **Search** the knowledge base by keyword or semantic query to preview retrieved chunks.
+
+### How to Reproduce
+1. Start the application and navigate to the web console.
+2. Browse all available pages: Dashboard (`/`), DAG Visualizer (`/dag`), Live Trace (`/live`), Settings (`/settings`).
+3. Attempt to find any page for uploading PDFs, viewing pipeline status, or managing knowledge base documents.
+4. Confirm that no such feature exists on any page.
+
+### Affected Files
+- Backend: new router (`backend/app/routers/knowledge.py`) with endpoints for upload, list, delete, and search; wiring to existing `document_parser.py`, `vector_store.py`, and `github_sync.py` services.
+- Frontend: new `/knowledge` page with upload form, pipeline status display, document library browser, and delete controls.
+- `frontend/src/app/layout.tsx`: add navigation item for the new page.
+
+---
+
+## Bug 4: Missing Agent Service Control and Worker Status Management in Web Console
 
 ### Symptom
 The requirement specification §5 (Inter-Agent Communication & Control Flow) defines an **Agent Service (Worker Pool)** that establishes multiple independent execution environments (workers) managed by the Orchestrator. The requirement specification §7 (Interface Requirements) explicitly mandates **"Worker status display"** in the Dashboard. However, the web console provides:
@@ -82,7 +115,7 @@ This is required by §5 which defines the Worker Pool architecture and §7 which
 
 ---
 
-## Bug 4: Missing Task Execution Feature from Web Console
+## Bug 5: Missing Task Execution Feature from Web Console
 
 ### Symptom
 The web console does not provide any mechanism for users to **submit new queries or tasks** for execution. The Dashboard (`/`) only displays execution history. The DAG Visualizer (`/dag`) only renders previously completed DAG runs. The Live Trace (`/live`) requires a pre-existing `run_id` to connect. There is no entry point for a user to initiate a new task.
