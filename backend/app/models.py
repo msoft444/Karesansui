@@ -24,6 +24,7 @@ class History(Base):
         index=True,
         nullable=False,
     )
+    run_id = Column(String, nullable=True, index=True)
     task_id = Column(String, nullable=False, index=True)
     role = Column(String, nullable=False)
     result = Column(JSONB, nullable=True)

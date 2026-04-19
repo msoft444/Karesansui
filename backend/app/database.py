@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +25,16 @@ def init_db() -> None:
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(bind=engine)
+
+    # Apply pending Alembic migrations so that schema changes (e.g. new
+    # columns on existing tables) are reflected even when the DB volume
+    # was created by a previous version's create_all().
+    from alembic import command
+    from alembic.config import Config
+
+    alembic_cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    command.upgrade(alembic_cfg, "head")
 
 
 def get_db():

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 class HistoryCreate(BaseModel):
     """Payload for recording a new agent task execution."""
 
+    run_id: str | None = None
     task_id: str
     role: str
     result: dict[str, Any] | None = None
@@ -27,6 +28,7 @@ class HistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    run_id: str | None
     task_id: str
     role: str
     result: dict[str, Any] | None

@@ -12,11 +12,17 @@ router = APIRouter(prefix="/history", tags=["history"])
 
 
 @router.get("/", response_model=List[HistoryResponse])
-def list_history(task_id: str | None = None, db: Session = Depends(get_db)):
-    """Return all history records, optionally filtered by task_id."""
+def list_history(
+    task_id: str | None = None,
+    run_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Return all history records, optionally filtered by task_id or run_id."""
     query = db.query(History)
     if task_id:
         query = query.filter(History.task_id == task_id)
+    if run_id:
+        query = query.filter(History.run_id == run_id)
     return query.order_by(History.created_at.desc()).all()
 
 
