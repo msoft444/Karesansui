@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import ForeignKey
 
 from app.base import Base
 
@@ -104,6 +105,41 @@ class RoleTemplate(Base):
     system_prompt = Column(Text, nullable=False, default="")
     tools = Column(JSONB, nullable=False, default=list)
     default_params = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
+class KnowledgeDocument(Base):
+    """Tracks a PDF document through the knowledge-base ingestion pipeline.
+
+    Status transitions: uploading → splitting → vectorizing → syncing → completed | failed.
+    """
+
+    __tablename__ = "knowledge_documents"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+    filename = Column(String, nullable=False)
+    source_pdf_path = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="uploading")
+    error_message = Column(Text, nullable=True)
+    page_count = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
+    github_path = Column(String, nullable=True)
+    output_dir = Column(String, nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=_utcnow,

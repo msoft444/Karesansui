@@ -138,3 +138,92 @@ class RoleTemplateResponse(BaseModel):
     default_params: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeDocument schemas
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeDocumentResponse(BaseModel):
+    """Minimal KnowledgeDocument record returned immediately after upload (status=uploading)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    status: str
+    error_message: str | None
+    page_count: int | None
+    chunk_count: int | None
+    github_path: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeChunkResult(BaseModel):
+    """A single search result chunk from the knowledge base."""
+
+    id: str
+    source_pdf: str
+    section_title: str
+    level: int
+    start_page: int
+    end_page: int
+    markdown_path: str | None
+    content: str
+    distance: float
+
+
+class KnowledgeSectionSummary(BaseModel):
+    """Lightweight section descriptor — used in the document list view."""
+
+    id: str
+    section_title: str
+    level: int
+    start_page: int
+    end_page: int
+
+
+class KnowledgeDocumentListResponse(BaseModel):
+    """KnowledgeDocument record enriched with its chapter/section hierarchy.
+
+    Returned by ``GET /knowledge/`` so the frontend can display the document
+    library with hierarchical structure, processing status, and metadata.
+    """
+
+    id: uuid.UUID
+    filename: str
+    status: str
+    error_message: str | None
+    page_count: int | None
+    chunk_count: int | None
+    github_path: str | None
+    created_at: datetime
+    updated_at: datetime
+    # Ordered list of section descriptors from the ingested KnowledgeChunk rows.
+    sections: list[KnowledgeSectionSummary] = []
+
+
+class KnowledgeDocumentDetailResponse(KnowledgeDocumentListResponse):
+    """Full document record with chapter/section tree and individual chunk previews.
+
+    Returned by ``GET /knowledge/{doc_id}`` so the frontend can render the
+    complete hierarchical structure and content previews for each section.
+    """
+
+    # Full chunk list including content — allows expandable previews in the UI.
+    chunks: list[KnowledgeChunkResult] = []
+
+
+class KnowledgeSearchRequest(BaseModel):
+    """Payload for a semantic knowledge-base search."""
+
+    query: str
+    top_k: int = 5
+
+
+class KnowledgeSearchResponse(BaseModel):
+    """Top-K semantically similar chunks returned by a knowledge-base search."""
+
+    results: list[KnowledgeChunkResult]

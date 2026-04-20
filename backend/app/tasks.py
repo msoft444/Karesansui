@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Type
 
 from celery import Task
@@ -138,3 +139,145 @@ def run_structured_inference(
             )
             raise self.retry(exc=exc, countdown=_backoff(self))
         raise
+
+
+# ---------------------------------------------------------------------------
+# Task: process_knowledge_document
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=0,
+    name="app.tasks.process_knowledge_document",
+)
+def process_knowledge_document(
+    self: Task,
+    *,
+    doc_id: str,
+    pdf_path: str,
+    output_dir: str,
+) -> dict[str, Any]:
+    """Run the full knowledge-base ingestion pipeline for a single PDF document.
+
+    Stages:
+        splitting   — parse_and_split() splits the PDF by TOC and converts to Markdown.
+        vectorizing — each section's Markdown content is embedded and stored in pgvector.
+        syncing     — converted Markdown files are pushed to the GitHub repository.
+
+    KnowledgeDocument.status is updated at each stage transition so the frontend
+    can display real-time pipeline progress.
+
+    Args:
+        doc_id:     UUID string of the KnowledgeDocument tracking record.
+        pdf_path:   Absolute path to the uploaded PDF file.
+        output_dir: Directory where split PDFs and Markdown files will be written.
+
+    Returns:
+        Dict with ``doc_id``, ``status``, and ``chunk_count`` on success.
+    """
+    import uuid as _uuid
+
+    from app.database import SessionLocal
+    from app.models import KnowledgeDocument
+    from app.services import document_parser, github_sync, vector_store
+
+    db = SessionLocal()
+
+    def _set_status(new_status: str, **fields: Any) -> None:
+        """Update KnowledgeDocument.status and any extra fields in a single commit."""
+        doc = db.get(KnowledgeDocument, _uuid.UUID(doc_id))
+        if doc is None:
+            return
+        doc.status = new_status
+        for key, val in fields.items():
+            setattr(doc, key, val)
+        db.commit()
+
+    try:
+        # Stage 1: split PDF into sections and convert each to Markdown
+        _set_status("splitting")
+        sections = document_parser.parse_and_split(pdf_path, output_dir)
+
+        # parse_and_split performs both TOC-based splitting and MarkItDown
+        # conversion in a single call; transition to "converting" status here
+        # to reflect the completed conversion stage before vectorization begins.
+        _set_status("converting")
+
+        # Determine total page count from the original PDF
+        try:
+            import pypdf  # type: ignore[import]
+            total_pages: int = len(pypdf.PdfReader(pdf_path).pages)
+        except Exception:
+            total_pages = sections[-1]["end"] if sections else 0
+
+        # Stage 2: embed each section and persist to pgvector
+        _set_status("vectorizing", page_count=total_pages)
+        chunk_count = 0
+        for section in sections:
+            md_path: str | None = section.get("markdown")
+            if md_path:
+                try:
+                    content = Path(md_path).read_text(encoding="utf-8")
+                except Exception:
+                    content = section.get("title", "")
+            else:
+                content = section.get("title", "")
+
+            if not content.strip():
+                continue
+
+            vector_store.insert_chunk(
+                db=db,
+                source_pdf=pdf_path,
+                section_title=section["title"],
+                level=section["level"],
+                start_page=section["start"],
+                end_page=section["end"],
+                content=content,
+                markdown_path=md_path,
+            )
+            chunk_count += 1
+
+        db.commit()
+
+        # Stage 3: push Markdown files to GitHub repository.
+        # Each document is stored under a unique per-document subtree
+        # (knowledge_base/<doc_id>/) so that per-document deletion via
+        # DELETE /knowledge/{doc_id} targets exactly the right repository path.
+        _set_status("syncing", chunk_count=chunk_count)
+        doc_repo_base = f"knowledge_base/{doc_id}"
+        try:
+            github_sync.push_markdown_files(output_dir, repo_base_path=doc_repo_base)
+            github_path: str = doc_repo_base
+        except RuntimeError as exc:
+            # GitHub sync failed (e.g. GITHUB_TOKEN not set or repository
+            # inaccessible). Mark the document as failed so the frontend can
+            # display a clear failure indicator instead of a misleading
+            # "completed" status for a document whose files were never synced.
+            logger.warning(
+                "[process_knowledge_document] GitHub sync failed for doc %s: %s",
+                doc_id,
+                exc,
+            )
+            _set_status("failed", error_message=f"GitHub sync failed: {exc}")
+            return {"doc_id": doc_id, "status": "failed", "chunk_count": chunk_count}
+
+        _set_status("completed", chunk_count=chunk_count, github_path=github_path)
+        logger.info(
+            "[process_knowledge_document] Completed doc %s: %d chunks", doc_id, chunk_count
+        )
+        return {"doc_id": doc_id, "status": "completed", "chunk_count": chunk_count}
+
+    except Exception as exc:
+        logger.exception(
+            "[process_knowledge_document] Pipeline failed for doc %s", doc_id
+        )
+        try:
+            _set_status("failed", error_message=str(exc))
+        except Exception:
+            pass
+        raise
+
+    finally:
+        db.close()
