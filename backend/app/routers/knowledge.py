@@ -153,7 +153,8 @@ async def upload_document(
         )
 
     # Create the tracking record first so we have an ID for the temp directory.
-    doc = KnowledgeDocument(filename=filename, status="uploading")
+    from app.models import DocumentStatus as _DocumentStatus
+    doc = KnowledgeDocument(filename=filename, status=_DocumentStatus.uploading)
     db.add(doc)
     db.commit()
     db.refresh(doc)

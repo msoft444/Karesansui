@@ -1,8 +1,9 @@
+import enum
 import uuid
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, Enum, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy import ForeignKey
 
@@ -68,6 +69,13 @@ class KnowledgeChunk(Base):
         default=uuid.uuid4,
         nullable=False,
     )
+    # Foreign key linking this chunk to its parent KnowledgeDocument record.
+    document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     source_pdf = Column(String, nullable=False, index=True)
     section_title = Column(String, nullable=False)
     level = Column(Integer, nullable=False)
@@ -118,10 +126,22 @@ class RoleTemplate(Base):
     )
 
 
+class DocumentStatus(str, enum.Enum):
+    """Valid pipeline status values for KnowledgeDocument.status."""
+
+    uploading = "uploading"
+    splitting = "splitting"
+    converting = "converting"
+    vectorizing = "vectorizing"
+    syncing = "syncing"
+    completed = "completed"
+    failed = "failed"
+
+
 class KnowledgeDocument(Base):
     """Tracks a PDF document through the knowledge-base ingestion pipeline.
 
-    Status transitions: uploading → splitting → vectorizing → syncing → completed | failed.
+    Status transitions: uploading → splitting → converting → vectorizing → syncing → completed | failed.
     """
 
     __tablename__ = "knowledge_documents"
@@ -134,7 +154,11 @@ class KnowledgeDocument(Base):
     )
     filename = Column(String, nullable=False)
     source_pdf_path = Column(String, nullable=True)
-    status = Column(String, nullable=False, default="uploading")
+    status = Column(
+        Enum(DocumentStatus, name="documentstatus", create_constraint=True),
+        nullable=False,
+        default=DocumentStatus.uploading,
+    )
     error_message = Column(Text, nullable=True)
     page_count = Column(Integer, nullable=True)
     chunk_count = Column(Integer, nullable=True)

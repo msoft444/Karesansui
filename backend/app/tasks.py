@@ -179,12 +179,12 @@ def process_knowledge_document(
     import uuid as _uuid
 
     from app.database import SessionLocal
-    from app.models import KnowledgeDocument
+    from app.models import DocumentStatus, KnowledgeDocument
     from app.services import document_parser, github_sync, vector_store
 
     db = SessionLocal()
 
-    def _set_status(new_status: str, **fields: Any) -> None:
+    def _set_status(new_status: DocumentStatus, **fields: Any) -> None:
         """Update KnowledgeDocument.status and any extra fields in a single commit."""
         doc = db.get(KnowledgeDocument, _uuid.UUID(doc_id))
         if doc is None:
@@ -196,13 +196,13 @@ def process_knowledge_document(
 
     try:
         # Stage 1: split PDF into sections and convert each to Markdown
-        _set_status("splitting")
+        _set_status(DocumentStatus.splitting)
         sections = document_parser.parse_and_split(pdf_path, output_dir)
 
         # parse_and_split performs both TOC-based splitting and MarkItDown
         # conversion in a single call; transition to "converting" status here
         # to reflect the completed conversion stage before vectorization begins.
-        _set_status("converting")
+        _set_status(DocumentStatus.converting)
 
         # Determine total page count from the original PDF
         try:
@@ -212,7 +212,7 @@ def process_knowledge_document(
             total_pages = sections[-1]["end"] if sections else 0
 
         # Stage 2: embed each section and persist to pgvector
-        _set_status("vectorizing", page_count=total_pages)
+        _set_status(DocumentStatus.vectorizing, page_count=total_pages)
         chunk_count = 0
         for section in sections:
             md_path: str | None = section.get("markdown")
@@ -236,6 +236,7 @@ def process_knowledge_document(
                 end_page=section["end"],
                 content=content,
                 markdown_path=md_path,
+                document_id=doc_id,
             )
             chunk_count += 1
 
@@ -245,7 +246,7 @@ def process_knowledge_document(
         # Each document is stored under a unique per-document subtree
         # (knowledge_base/<doc_id>/) so that per-document deletion via
         # DELETE /knowledge/{doc_id} targets exactly the right repository path.
-        _set_status("syncing", chunk_count=chunk_count)
+        _set_status(DocumentStatus.syncing, chunk_count=chunk_count)
         doc_repo_base = f"knowledge_base/{doc_id}"
         try:
             github_sync.push_markdown_files(output_dir, repo_base_path=doc_repo_base)
@@ -260,10 +261,10 @@ def process_knowledge_document(
                 doc_id,
                 exc,
             )
-            _set_status("failed", error_message=f"GitHub sync failed: {exc}")
+            _set_status(DocumentStatus.failed, error_message=f"GitHub sync failed: {exc}")
             return {"doc_id": doc_id, "status": "failed", "chunk_count": chunk_count}
 
-        _set_status("completed", chunk_count=chunk_count, github_path=github_path)
+        _set_status(DocumentStatus.completed, chunk_count=chunk_count, github_path=github_path)
         logger.info(
             "[process_knowledge_document] Completed doc %s: %d chunks", doc_id, chunk_count
         )
@@ -274,7 +275,7 @@ def process_knowledge_document(
             "[process_knowledge_document] Pipeline failed for doc %s", doc_id
         )
         try:
-            _set_status("failed", error_message=str(exc))
+            _set_status(DocumentStatus.failed, error_message=str(exc))
         except Exception:
             pass
         raise
