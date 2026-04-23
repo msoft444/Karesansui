@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 
@@ -31,10 +32,21 @@ def list_workers():
     active: Dict[str, Any] = _inspect_safe("active")
     stats: Dict[str, Any] = _inspect_safe("stats")
 
+    # Use ping() to get a concrete last-heartbeat timestamp for each worker.
+    # ping() returns {worker_name: [{"ok": "pong"}]} for reachable workers.
+    ping_result: Dict[str, Any] = _inspect_safe("ping")
+    # Record the UTC wall-clock time of this inspect call as the heartbeat for
+    # every worker that responded to ping.  Workers that did not respond to ping
+    # but were discovered via active/stats still appear as online (they may have
+    # replied to the broker query but not to the direct ping), and their
+    # last_heartbeat is set to None.
+    now_iso: str = datetime.now(timezone.utc).isoformat()
+
     workers: List[Dict[str, Any]] = []
-    # Build response from all worker names known via either active or stats.
-    all_names = set(active.keys()) | set(stats.keys())
+    # Build response from all worker names known via any of the three calls.
+    all_names = set(active.keys()) | set(stats.keys()) | set(ping_result.keys())
     for name in sorted(all_names):
+        last_heartbeat: Optional[str] = now_iso if name in ping_result else None
         workers.append(
             {
                 "name": name,
@@ -42,6 +54,7 @@ def list_workers():
                 "active_tasks": active.get(name, []),
                 "active_task_count": len(active.get(name, [])),
                 "stats": stats.get(name, {}),
+                "last_heartbeat": last_heartbeat,
             }
         )
     return workers

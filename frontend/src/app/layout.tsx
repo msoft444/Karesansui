@@ -54,6 +54,15 @@ const navItems = [
     ),
   },
   {
+    href: "/workers",
+    label: "ワーカー管理",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 7.5h18M7.5 21V7.5m9 13.5V7.5M12 3v3.75" />
+      </svg>
+    ),
+  },
+  {
     href: "/settings",
     label: "設定",
     icon: (
