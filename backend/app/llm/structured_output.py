@@ -67,11 +67,13 @@ async def generate_structured(
         A validated instance of *response_model*.
 
     Raises:
-        instructor.exceptions.InstructorRetryException: When the model fails to
-            produce schema-compliant output within *max_retries* attempts.
-        openai.APIConnectionError: When the inference engine is unreachable.
-        openai.APITimeoutError: When the request exceeds the configured timeout.
-        openai.APIStatusError: When the inference engine returns an HTTP error status.
+        RuntimeError: For all failure modes — connectivity, timeout, API status errors,
+            and schema-validation failures.  The message prefix indicates the category:
+            ``[structured_output] connectivity-failure`` for network / timeout errors,
+            ``[structured_output] schema-validation-failure`` for instructor-level
+            retry exhaustion, or ``[structured_output] API error`` for HTTP status errors.
+            This normalisation ensures callers can classify the failure without inspecting
+            the verbose internal ``InstructorRetryException`` XML dump.
     """
     effective_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT_SECONDS
 
@@ -87,15 +89,40 @@ async def generate_structured(
         )
     except openai.APIConnectionError as exc:
         raise RuntimeError(
-            f"[structured_output] Connection failed: url={INFERENCE_API_BASE_URL}, model={model}"
+            f"[structured_output] connectivity-failure: inference backend unreachable"
+            f" — url={INFERENCE_API_BASE_URL}, model={model}"
         ) from exc
     except openai.APITimeoutError as exc:
         raise RuntimeError(
-            f"[structured_output] Request timed out after {effective_timeout}s: url={INFERENCE_API_BASE_URL}, model={model}"
+            f"[structured_output] connectivity-failure: request timed out after {effective_timeout}s"
+            f" — url={INFERENCE_API_BASE_URL}, model={model}"
         ) from exc
     except openai.APIStatusError as exc:
         raise RuntimeError(
             f"[structured_output] API error (status={exc.status_code}): url={INFERENCE_API_BASE_URL}, model={model} — {exc.message}"
         ) from exc
+    except Exception as exc:  # noqa: BLE001
+        # instructor exhausts its internal retries and raises InstructorRetryException,
+        # which wraps every attempt.  Re-classify here so callers can distinguish
+        # connectivity problems from schema-validation problems without parsing the
+        # verbose XML attempt dump.
+        if "InstructorRetryException" in type(exc).__qualname__:
+            exc_str = str(exc)
+            if (
+                "Connection error" in exc_str
+                or "APIConnectionError" in exc_str
+                or "connectivity-failure" in exc_str
+                or "URLError" in exc_str
+                or "ECONNREFUSED" in exc_str
+            ):
+                raise RuntimeError(
+                    f"[structured_output] connectivity-failure: inference backend unreachable"
+                    f" — url={INFERENCE_API_BASE_URL}, model={model}"
+                ) from exc
+            raise RuntimeError(
+                f"[structured_output] schema-validation-failure: model failed to produce"
+                f" valid structured output — url={INFERENCE_API_BASE_URL}, model={model}"
+            ) from exc
+        raise
 
     return result

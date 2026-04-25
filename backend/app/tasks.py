@@ -113,10 +113,21 @@ def run_structured_inference(
             },
         }
 
-    # Transient connection failures → retry with exponential backoff
+    # Transient connection and schema-validation failures → retry with exponential backoff.
+    # generate_structured() normalises all InstructorRetryException / APIConnectionError
+    # variants into RuntimeError with a known prefix, so both categories are caught here:
+    #   "[structured_output] connectivity-failure: ..."
+    #   "[inference_client] Connection failed: ..."          (unchanged in inference_client.py)
+    #   "... timed out ..."                                  (timeout messages still contain this)
+    #   "[structured_output] schema-validation-failure: ..."  (replaces raw InstructorRetryException)
     except RuntimeError as exc:
         error_msg = str(exc)
-        if "Connection failed" in error_msg or "timed out" in error_msg:
+        if (
+            "connectivity-failure" in error_msg
+            or "Connection failed" in error_msg
+            or "timed out" in error_msg
+            or "schema-validation-failure" in error_msg
+        ):
             logger.warning(
                 "[run_structured_inference] Transient error (attempt %d/%d): %s",
                 self.request.retries + 1,
@@ -126,7 +137,8 @@ def run_structured_inference(
             raise self.retry(exc=exc, countdown=_backoff(self))
         raise
 
-    # JSON / schema validation failures from instructor → retry with backoff
+    # Defensive fallback: catch any raw InstructorRetryException / ValidationError
+    # that somehow bypasses generate_structured()'s normalisation layer.
     except Exception as exc:  # noqa: BLE001
         exc_name = type(exc).__name__
         if "InstructorRetryException" in exc_name or "ValidationError" in exc_name:
@@ -512,13 +524,26 @@ def run_orchestration_pipeline(
             _terminal_status = (
                 "planner-failed" if _pipeline_stage == "planner" else "orchestration-failed"
             )
+            # Classify the error type so consumers can distinguish connectivity
+            # problems from schema-validation failures without parsing the error string.
+            _err_msg = str(exc)
+            if "connectivity-failure" in _err_msg or "Connection failed" in _err_msg:
+                _error_type = "connectivity"
+            elif "schema-validation-failure" in _err_msg:
+                _error_type = "validation"
+            else:
+                _error_type = "inference"
             try:
                 from app.models import History as _History
                 db.add(_History(
                     run_id=run_id,
                     task_id=f"pipeline_failed_{run_id}",
                     role="Planner",
-                    result={"status": _terminal_status, "error": str(exc)[:500]},
+                    result={
+                        "status": _terminal_status,
+                        "error": _err_msg[:800],
+                        "error_type": _error_type,
+                    },
                     progress=None,
                 ))
                 db.commit()
