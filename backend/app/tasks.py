@@ -467,6 +467,25 @@ def run_orchestration_pipeline(
         return {"run_id": run_id, "task_results": task_results}
 
     except Exception as exc:
+        # Only write a terminal-failure row when the pipeline is truly dead
+        # (not merely being retried by Celery).
+        from celery.exceptions import Retry as _CeleryRetry
+        if not isinstance(exc, _CeleryRetry):
+            try:
+                from app.models import History as _History
+                db.add(_History(
+                    run_id=run_id,
+                    task_id=f"pipeline_failed_{run_id}",
+                    role="Planner",
+                    result={"status": "failed", "error": str(exc)[:500]},
+                    progress=None,
+                ))
+                db.commit()
+            except Exception:
+                logger.exception(
+                    "[run_orchestration_pipeline] Could not persist failure row for run_id=%s",
+                    run_id,
+                )
         logger.exception(
             "[run_orchestration_pipeline] Pipeline failed for run_id=%s", run_id
         )
