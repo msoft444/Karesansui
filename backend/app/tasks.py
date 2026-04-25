@@ -117,8 +117,9 @@ def run_structured_inference(
     # generate_structured() normalises all InstructorRetryException / APIConnectionError
     # variants into RuntimeError with a known prefix, so both categories are caught here:
     #   "[structured_output] connectivity-failure: ..."
-    #   "[inference_client] Connection failed: ..."          (unchanged in inference_client.py)
-    #   "... timed out ..."                                  (timeout messages still contain this)
+    #   "[inference_client] connectivity-failure: ..."  (non-structured path, aligned prefix)
+    #   "Connection failed"                             (legacy fallback, kept for safety)
+    #   "... timed out ..."                             (timeout messages still contain this)
     #   "[structured_output] schema-validation-failure: ..."  (replaces raw InstructorRetryException)
     except RuntimeError as exc:
         error_msg = str(exc)

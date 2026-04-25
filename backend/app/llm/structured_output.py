@@ -119,6 +119,16 @@ async def generate_structured(
                     f"[structured_output] connectivity-failure: inference backend unreachable"
                     f" — url={INFERENCE_API_BASE_URL}, model={model}"
                 ) from exc
+            if (
+                "TimeoutError" in exc_str
+                or "APITimeoutError" in exc_str
+                or "timed out" in exc_str
+                or "ReadTimeout" in exc_str
+            ):
+                raise RuntimeError(
+                    f"[structured_output] connectivity-failure: request timed out after {effective_timeout}s"
+                    f" — url={INFERENCE_API_BASE_URL}, model={model}"
+                ) from exc
             raise RuntimeError(
                 f"[structured_output] schema-validation-failure: model failed to produce"
                 f" valid structured output — url={INFERENCE_API_BASE_URL}, model={model}"

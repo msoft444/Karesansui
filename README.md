@@ -50,6 +50,28 @@ python3 -m mlx_lm server --model prism-ml/Ternary-Bonsai-8B-mlx-2bit --port 8000
 
 > **注意:** サーバーを停止すると推論が止まります。Karesansui のコンテナ起動前に必ずサーバーを起動しておいてください。
 
+### 1-3. 推論サーバーの疎通確認 (Verifying Reachability)
+
+タスクを投入する前に、以下のコマンドで推論サーバーへの接続を確認してください。
+
+**ホスト側から確認:**
+```bash
+curl -s http://localhost:8000/v1/models | head -c 300
+```
+
+**コンテナ (backend) 側から確認:**
+```bash
+docker compose exec backend python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
+```
+
+**コンテナ (worker) 側から確認:**
+```bash
+docker compose exec worker python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
+```
+
+いずれのコマンドも `{"object":"list","data":[...]}` 形式の JSON を返すことを確認してください。  
+接続できない場合、ワーカーは `error_type=connectivity` タグ付きの `pipeline_failed_<run_id>` 履歴レコードを書き込み、タスクは Planner 段階で停止します。
+
 ---
 
 ## ステップ 2: 環境変数の設定 (Environment Variables)

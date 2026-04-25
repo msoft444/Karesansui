@@ -185,10 +185,10 @@ class TestErrorTypeClassification:
                 " — url=http://host.docker.internal:8000/v1, model=karesansui",
                 "connectivity",
             ),
-            # inference_client.py Connection failed prefix (unchanged)
+            # inference_client.py connectivity-failure prefix (aligned with structured_output)
             (
-                "[inference_client] Connection failed: url=http://host.docker.internal:8000/v1,"
-                " model=karesansui",
+                "[inference_client] connectivity-failure: inference backend unreachable"
+                " — url=http://host.docker.internal:8000/v1, model=karesansui",
                 "connectivity",
             ),
             # schema-validation-failure prefix set by generate_structured()
