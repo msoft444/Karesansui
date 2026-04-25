@@ -1,9 +1,11 @@
+import enum
 import uuid
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Enum, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import ForeignKey
 
 from app.base import Base
 
@@ -67,6 +69,13 @@ class KnowledgeChunk(Base):
         default=uuid.uuid4,
         nullable=False,
     )
+    # Foreign key linking this chunk to its parent KnowledgeDocument record.
+    document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     source_pdf = Column(String, nullable=False, index=True)
     section_title = Column(String, nullable=False)
     level = Column(Integer, nullable=False)
@@ -78,5 +87,91 @@ class KnowledgeChunk(Base):
     created_at = Column(
         DateTime(timezone=True),
         default=_utcnow,
+        nullable=False,
+    )
+
+
+class RoleTemplate(Base):
+    """Predefined agent role templates selectable by the Planner when building a DAG.
+
+    Each template encapsulates a system prompt, an optional list of available
+    tool names, and default dynamic parameters that can be overridden at
+    task-assignment time.
+    """
+
+    __tablename__ = "role_templates"
+    __table_args__ = (UniqueConstraint("name", name="uq_role_templates_name"),)
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    system_prompt = Column(Text, nullable=False, default="")
+    tools = Column(JSONB, nullable=False, default=list)
+    default_params = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
+class DocumentStatus(str, enum.Enum):
+    """Valid pipeline status values for KnowledgeDocument.status."""
+
+    uploading = "uploading"
+    splitting = "splitting"
+    converting = "converting"
+    vectorizing = "vectorizing"
+    syncing = "syncing"
+    completed = "completed"
+    failed = "failed"
+
+
+class KnowledgeDocument(Base):
+    """Tracks a PDF document through the knowledge-base ingestion pipeline.
+
+    Status transitions: uploading → splitting → converting → vectorizing → syncing → completed | failed.
+    """
+
+    __tablename__ = "knowledge_documents"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+    filename = Column(String, nullable=False)
+    source_pdf_path = Column(String, nullable=True)
+    status = Column(
+        Enum(DocumentStatus, name="documentstatus", create_constraint=True),
+        nullable=False,
+        default=DocumentStatus.uploading,
+    )
+    error_message = Column(Text, nullable=True)
+    page_count = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
+    github_path = Column(String, nullable=True)
+    output_dir = Column(String, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
         nullable=False,
     )

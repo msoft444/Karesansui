@@ -158,7 +158,7 @@ export default function DagPage() {
 
   // Fetch all records — 3 s polling for live status updates during execution
   const { data: allHistory, error, isLoading } = useSWR<HistoryRecord[]>(
-    "/api/history/",
+    "/api/history",
     fetcher,
     { refreshInterval: 3000 }
   );

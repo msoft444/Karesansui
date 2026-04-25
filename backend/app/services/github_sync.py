@@ -173,3 +173,71 @@ def _upsert_file(
         return "created"
     except GithubException as exc:
         raise GithubException(exc.status, exc.data) from exc
+
+
+def delete_document_files(
+    repo_base_path: str,
+    branch: str = "main",
+    commit_message: str = "chore: remove knowledge base document",
+) -> list[str]:
+    """
+    Delete all files under *repo_base_path* in the GitHub repository.
+
+    Each file is deleted individually so that any partial failure does not
+    prevent the remaining files from being removed.  Errors for individual
+    files are silently suppressed; only authentication / repository access
+    errors are propagated.
+
+    Args:
+        repo_base_path:  Path prefix inside the repository (e.g. "knowledge_base/doc-uuid").
+        branch:          Target branch (default: "main").
+        commit_message:  Commit message used for each deletion.
+
+    Returns:
+        A list of repository paths that were successfully deleted.
+
+    Raises:
+        RuntimeError: When GITHUB_TOKEN or GITHUB_REPO are not set, or the
+                      repository is inaccessible.
+    """
+    client = _get_github_client()
+    repo = _get_repo(client)
+    deleted: list[str] = []
+    failed: list[str] = []
+
+    def _delete_tree(path: str) -> None:
+        """Recursively delete all files under *path* in the repository."""
+        try:
+            contents = repo.get_contents(path, ref=branch)
+        except UnknownObjectException:
+            return  # Path does not exist — nothing to delete
+        if not isinstance(contents, list):
+            contents = [contents]
+        for item in contents:
+            if item.type == "dir":
+                # Recurse into subdirectories before attempting deletion.
+                _delete_tree(item.path)
+            else:
+                try:
+                    repo.delete_file(
+                        path=item.path,
+                        message=commit_message,
+                        sha=item.sha,
+                        branch=branch,
+                    )
+                    deleted.append(item.path)
+                except Exception as exc:  # noqa: BLE001
+                    # Track the failure so the caller can decide whether to
+                    # treat a partial delete as an error.
+                    failed.append(item.path)
+
+    _delete_tree(repo_base_path)
+
+    if failed:
+        raise RuntimeError(
+            f"Failed to delete {len(failed)} file(s) from the repository: "
+            + ", ".join(failed[:5])
+            + (" …" if len(failed) > 5 else "")
+        )
+
+    return deleted

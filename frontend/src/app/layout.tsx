@@ -3,8 +3,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Karesansui",
-  description: "Ternary Bonsai Multi-Agent System Console",
+  title: "枯山水 v1.4.1",
+  description: "枯山水 マルチエージェントシステム コンソール",
 };
 
 const navItems = [
@@ -36,6 +36,33 @@ const navItems = [
     ),
   },
   {
+    href: "/templates",
+    label: "役割テンプレート",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+      </svg>
+    ),
+  },
+  {
+    href: "/knowledge",
+    label: "ナレッジベース",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+      </svg>
+    ),
+  },
+  {
+    href: "/workers",
+    label: "ワーカー管理",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 7.5h18M7.5 21V7.5m9 13.5V7.5M12 3v3.75" />
+      </svg>
+    ),
+  },
+  {
     href: "/settings",
     label: "設定",
     icon: (
@@ -59,8 +86,8 @@ export default function RootLayout({
         <aside className="w-56 shrink-0 border-r border-gray-800 flex flex-col">
           {/* Branding */}
           <div className="px-5 py-5 border-b border-gray-800">
-            <p className="text-base font-bold text-white tracking-wide">Karesansui</p>
-            <p className="text-xs text-gray-600 mt-0.5">Multi-Agent Console</p>
+            <p className="text-base font-bold text-white tracking-wide">枯山水</p>
+            <p className="text-xs text-gray-600 mt-0.5">マルチエージェントコンソール</p>
           </div>
 
           {/* Navigation */}
@@ -79,7 +106,7 @@ export default function RootLayout({
 
           {/* Footer */}
           <div className="px-5 py-4 border-t border-gray-800">
-            <p className="text-xs text-gray-700">v0.1.0</p>
+            <p className="text-xs text-gray-700">v1.4.1</p>
           </div>
         </aside>
 

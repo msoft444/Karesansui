@@ -76,6 +76,7 @@ def insert_chunk(
     end_page: int,
     content: str,
     markdown_path: str | None = None,
+    document_id: str | None = None,
 ) -> KnowledgeChunk:
     """
     Embed *content* and persist a KnowledgeChunk row in the database.
@@ -97,6 +98,8 @@ def insert_chunk(
         The flushed KnowledgeChunk ORM object (id is available after flush).
     """
     vector = embed(content)
+    import uuid as _uuid
+
     chunk = KnowledgeChunk(
         source_pdf=source_pdf,
         section_title=section_title,
@@ -106,6 +109,7 @@ def insert_chunk(
         content=content,
         embedding=vector,
         markdown_path=markdown_path,
+        document_id=_uuid.UUID(document_id) if document_id else None,
     )
     db.add(chunk)
     db.flush()

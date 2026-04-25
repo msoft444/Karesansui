@@ -51,10 +51,38 @@ services:
       GITHUB_REPO: ${GITHUB_REPO}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - knowledge_uploads:/tmp/karesansui_knowledge
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "${PORT_PREFIX:-80}01:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - karesansui_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Celery Worker (knowledge-base ingestion pipeline)
+  # Shares the same image and environment as the backend but
+  # runs the Celery consumer instead of the HTTP server.
+  # ----------------------------------------------------------
+  worker:
+    build: ./backend
+    command: celery -A app.worker:celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://karesansui:changeme@db:5432/karesansui}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_REPO: ${GITHUB_REPO}
+    volumes:
+      - knowledge_uploads:/tmp/karesansui_knowledge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -76,3 +104,6 @@ networks:
 # ----------------------------------------------------------
 volumes:
   postgres_data:
+  # Shared volume so the backend API container and the Celery worker container
+  # both access the same uploaded PDFs and pipeline output files.
+  knowledge_uploads:

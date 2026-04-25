@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -98,3 +98,205 @@ class MediatorResponse(BaseModel):
     consensus_reached: bool
     conclusion: str
     reasoning: str
+
+
+class ReportSynthesizerResponse(BaseModel):
+    """Structured output for Standard agents (Data_Gatherer, Logical_Analyst,
+    Critical_Reviewer, Report_Synthesizer, Translator, Persona_Writer, etc.).
+
+    ``summary`` holds the agent's main conclusion and ``details`` captures
+    supporting points, evidence, or reasoning steps.
+    """
+
+    summary: str
+    details: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Planner DAG structured-output schemas
+# ---------------------------------------------------------------------------
+
+class StandardTaskNode(BaseModel):
+    """A single Standard-type task node in the Planner's DAG output."""
+
+    task_id: str
+    task_type: Literal["Standard"]
+    role: str
+    parent_ids: list[str] = []
+    dynamic_params: dict[str, Any] = {}
+
+
+class DebateTaskNode(BaseModel):
+    """A single Debate-type task node in the Planner's DAG output."""
+
+    task_id: str
+    task_type: Literal["Debate"]
+    participants: list[str]
+    mediator: str
+    parent_ids: list[str] = []
+    dynamic_params: dict[str, Any] = {}
+
+
+DagTaskNode = Annotated[
+    Union[StandardTaskNode, DebateTaskNode],
+    Field(discriminator="task_type"),
+]
+
+
+class DagPayload(BaseModel):
+    """Structured output schema for the Planner agent.
+
+    The instructor library enforces this schema at the logits level so the
+    Planner always emits a well-formed DAG JSON, satisfying
+    requirement_specification.md §9 (JSON Schema constraints).
+    ``model_dump()`` on an instance produces the exact dict shape that
+    ``DagParser`` accepts.
+    """
+
+    tasks: list[DagTaskNode]
+
+
+# ---------------------------------------------------------------------------
+# RoleTemplate schemas
+# ---------------------------------------------------------------------------
+
+
+class RoleTemplateCreate(BaseModel):
+    """Payload for creating a new role template."""
+
+    name: str
+    description: str = ""
+    system_prompt: str = ""
+    tools: list[str] = []
+    default_params: dict[str, Any] = {}
+
+
+class RoleTemplateUpdate(BaseModel):
+    """Partial update payload for an existing role template."""
+
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    default_params: dict[str, Any] | None = None
+
+
+class RoleTemplateResponse(BaseModel):
+    """Full representation of a RoleTemplate record returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    description: str
+    system_prompt: str
+    tools: list[str]
+    default_params: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeDocument schemas
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeDocumentResponse(BaseModel):
+    """Minimal KnowledgeDocument record returned immediately after upload (status=uploading)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    status: str
+    error_message: str | None
+    page_count: int | None
+    chunk_count: int | None
+    github_path: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeChunkResult(BaseModel):
+    """A single search result chunk from the knowledge base."""
+
+    id: str
+    source_pdf: str
+    section_title: str
+    level: int
+    start_page: int
+    end_page: int
+    markdown_path: str | None
+    content: str
+    distance: float
+
+
+class KnowledgeSectionSummary(BaseModel):
+    """Lightweight section descriptor — used in the document list view."""
+
+    id: str
+    section_title: str
+    level: int
+    start_page: int
+    end_page: int
+
+
+class KnowledgeDocumentListResponse(BaseModel):
+    """KnowledgeDocument record enriched with its chapter/section hierarchy.
+
+    Returned by ``GET /knowledge/`` so the frontend can display the document
+    library with hierarchical structure, processing status, and metadata.
+    """
+
+    id: uuid.UUID
+    filename: str
+    status: str
+    error_message: str | None
+    page_count: int | None
+    chunk_count: int | None
+    github_path: str | None
+    created_at: datetime
+    updated_at: datetime
+    # Ordered list of section descriptors from the ingested KnowledgeChunk rows.
+    sections: list[KnowledgeSectionSummary] = []
+
+
+class KnowledgeDocumentDetailResponse(KnowledgeDocumentListResponse):
+    """Full document record with chapter/section tree and individual chunk previews.
+
+    Returned by ``GET /knowledge/{doc_id}`` so the frontend can render the
+    complete hierarchical structure and content previews for each section.
+    """
+
+    # Full chunk list including content — allows expandable previews in the UI.
+    chunks: list[KnowledgeChunkResult] = []
+
+
+class KnowledgeSearchRequest(BaseModel):
+    """Payload for a semantic knowledge-base search."""
+
+    query: str
+    top_k: int = 5
+
+
+class KnowledgeSearchResponse(BaseModel):
+    """Top-K semantically similar chunks returned by a knowledge-base search."""
+
+    results: list[KnowledgeChunkResult]
+
+
+# ---------------------------------------------------------------------------
+# Query submission schemas
+# ---------------------------------------------------------------------------
+
+
+class QueryRequest(BaseModel):
+    """Payload for submitting a new user query to the orchestration pipeline."""
+
+    query: str
+
+
+class QueryResponse(BaseModel):
+    """Response returned immediately after enqueuing a new orchestration run."""
+
+    run_id: str

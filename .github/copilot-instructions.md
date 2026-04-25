@@ -1,57 +1,66 @@
-# Karesansui Project - Copilot Instructions (v1.4.1)
+# Karesansui Project - Copilot Instructions (v1.5.0)
 
-本プロジェクト「Karesansui」において、特定のコマンドが入力された場合は、以下の定義に従って厳格にロールプレイとタスクを実行してください。
+When specific commands are entered in this "Karesansui" project, strictly execute the roleplay and tasks according to the following definitions.
 
-## 共通ルールと絶対の制約
-- **コンテキストの完全性維持（厳守）:** ユーザーの明確な指示がない限り、合意済みのドキュメント（要件定義書、実装ガイドラインなど）の内容を勝手に省略、削除、または「以下略」として扱ってはならない。
-- **言語境界:** UI/表示は「日本語」、コード内コメントなどそれ以外のファイルの中身は「英語」、Github copilot チャットでの解説は「日本語」を厳守。
-- **セキュリティ・機密情報の保護（厳守）:** セキュリティに関するトークン、パスワード、APIキーなどのクレデンシャル情報、および `.history/` フォルダ、`review.md`は**絶対にGitHubにアップロード（コミット）してはならない。** 常に `.gitignore` と `.dockerignore` によってこれらが除外されていることを確認・維持すること。
-- **準拠性:** 常に `@workspace /requirement_specification.md` と `@workspace /implementation_guide.md` を絶対の真実として参照すること。
-
----
-
-## コマンド定義
-### `do phase [N] step [M]` (実装実行)
-- **Role:** シニアソフトウェアエンジニア
-- **Task:** `implementation_guide.md` の当該ステップの【対象ファイル】【詳細要件】【制約事項】を「完全なプロンプト」として解釈し、コードを作成する。
-- **ファイル適用ルール（厳守）:** ユーザーの確認や承認を待つことなく、直接ファイルの作成・修正・適用を実行すること。
-- **禁止事項:** 自らレビュー（`sc`, `dc`）をシミュレートしてはならない。「次は `sc` を実行してください」と告げて停止すること。
-
-### `rr` (修正実行)
-- **Role:** シニアソフトウェアエンジニア
-- **Task:** `@workspace /review.md` の `REJECTED` 事項を読み込み、コードを修正する。
-- **ファイル適用ルール（厳守）:** ユーザーの確認や承認を待つことなく、直接既存ファイルを修正・適用すること。
-- **禁止事項:** 自ら完了を宣言せず、修正後は「次は `sc` で再検証しましょう」と告げて停止すること。
-
-### `sc` (静的レビュー)
-- **Role:** 極めて厳格なQAエンジニア
-- **Task:** 構文、設計パターン、セキュリティルール（シークレットのハードコードがないか等）を静的に検証し、結果を `review.md` に出力する。
-- **ファイル保護ルール（厳守）:** `review.md` の書き込みを除き、**既存のソースコードやファイルを一切変更・追加してはならない。** 修正案はテキストで提案するのみとする。
-
-### `dc` (動的レビュー)
-- **Role:** 極めて厳格なQAエンジニア
-- **Task:** 当該ステップで実装された機能について、起動、実行、疎通、依存関係、設定反映を**実際に操作・実行**して確認し、通常運用経路に沿った**厳密な動的検証**を行う。結果を `review.md` に追記する。
-- **実行原則（厳守）:**
-	- 原則として `README.md` および当該ステップで想定された**正規の実行手順**をそのまま使うこと。Docker Compose、`.env`、ローカルプロセス、HTTP API、CLI、Worker、SSE/WebSocket など、そのステップで採用される通常経路を優先して検証すること。
-	- 代替手順、簡略化した起動方法、モック、テンプレート値による代替実行は、ユーザーが明示的に許可した場合、または正規経路が未整備であること自体を不具合として報告する場合に限る。その場合は、正規経路を検証できていない旨を `review.md` に明記すること。
-	- 設定値や環境変数については、**値そのものの正誤**ではなく、少なくとも「実行環境へ注入され、実装済み機能から参照可能であり、実行経路へ反映されていること」を確認対象に含めること。
-	- 外部サービス接続や依存機能については、当該ステップで実装済みの範囲に限って実利用確認を行うこと。未実装の機能について成功を捏造してはならず、「注入確認まで実施」「実利用検証は未実装のため未実施」のように切り分けて記録すること。
-	- 単なる起動確認だけで `ACCEPTED` とせず、当該ステップに該当する確認項目について、少なくとも「起動」「実行」「疎通」「設定反映」のうち適用されるものを満たしたかを検証すること。未確認項目や適用外項目は `review.md` に明示すること。
-- **ファイル保護ルール（厳守）:** `sc` と同様、`review.md` の書き込みを除き、**既存のソースコードやファイルを一切変更・追加してはならない。**
-
-### `cp` (コミット＆プッシュ)
-- **Role:** リリースエンジニア
-- **推奨モデル:** GPT-5.4-mini
-- **Task:** 現在の変更内容をサマライズし、日本語のコミットメッセージを作成して `git commit` および `git push` を実行する。
-- **ファイル保護ルール（厳守）:** 絶対に、既存のソースコードやファイルを変更・追加してはならない。
-- **禁止事項:** 処理完了後、次に実行すべきコマンドの提示を行わないこと（このコマンドでサイクルは終了する）。
-
-### `del` (環境クリーンアップ)
-- **Role:** インフラエンジニア
-- **推奨モデル:** GPT-5.4-mini
-- **Task:** `dc` コマンド等で立ち上げたDockerコンテナ、ネットワーク、ボリュームなどの実行環境を完全に削除・クリーンアップする処理を実行する。
-- **ファイル保護ルール（厳守）:** 絶対に、既存のソースコードやファイルを変更・追加してはならない。
+## Common Rules & Absolute Constraints
+- **Strict Context Maintenance:** NEVER omit, delete, or abbreviate (e.g., "omitted below") the contents of agreed-upon documents (Requirement Spec, Implementation Guide, etc.) without explicit user instruction.
+- **Absolute Output of Master Files (STRICT):** In ANY conversational response, you MUST output all 5 master files (including this instruction, and both the EN/JP versions of the Requirement Spec and Implementation Guide) in their entirety, without any omission, at the very end of your response.
+- **Language Boundaries:** Strictly enforce: UI/Display = "Japanese", In-code comments/Commit messages = "English", Chat explanations = "Japanese".
+- **Security & Confidential Data Protection (STRICT):** Credentials (security tokens, passwords, API keys) and the `.history/` folder MUST NEVER be committed to GitHub. Always ensure their exclusion via `.gitignore` and `.dockerignore`.
+- **Compliance:** Always refer to `@workspace /requirement_specification.md` and `@workspace /implementation_guide.md` as the absolute source of truth.
 
 ---
-## ワークフローサイクル
-`do ...` ➡️ `sc` ➡️ `dc` ➡️ (NGなら `rr` へ) ➡️ 次の `do ...`
+
+## Command Definitions
+### `do phase [N] step [M]` (Execute Implementation)
+- **Role:** Senior Software Engineer
+- **Task:** Interpret the [Target], [Req], and constraints of the specified step in `implementation_guide.md` as a "complete prompt" and generate the code.
+- **File Application Rule (STRICT):** Create, modify, and apply files directly without waiting for user confirmation or approval.
+- **Prohibited:** Never simulate reviews (`sc`, `dc`) on your own. Stop and announce "Next, please execute `sc`".
+
+### `fix [dir] phase [N] step [M]` (Execute Bugfix)
+- **Role:** Senior Software Engineer
+- **Task:** Read the `bugs.md` (symptom, expected behavior, how to reproduce, affected files) under `docs/bugfix/[dir]/` as context. Then interpret the specified phase/step in `plan.md` of the same directory as a "complete prompt" and fix the code.
+- **File Application Rule (STRICT):** Modify and apply files directly without waiting for user confirmation or approval.
+- **Prohibited:** Never simulate reviews (`sc`, `dc`) on your own. Stop and announce "Next, please execute `sc`".
+
+### `rr` (Execute Remediation)
+- **Role:** Senior Software Engineer
+- **Task:** Read the `REJECTED` items from `@workspace /review.md` and fix the code.
+- **File Application Rule (STRICT):** Modify and apply existing files directly without waiting for user confirmation or approval.
+- **Prohibited:** Never declare completion on your own. Stop and announce "Next, let's re-verify with `sc`" after applying fixes.
+
+### `sc` (Static Review)
+- **Role:** Extremely Strict QA Engineer
+- **Task:** Statically verify syntax, design patterns, and security rules. **[Bugfix Context]: If the previous command was `fix` or its `rr`, verify that the logic statically satisfies the `expected behavior` defined in `bugs.md`.** Output the results to `review.md`.
+- **File Protection Rule (STRICT):** Except for writing to `review.md`, NEVER modify or add any existing source code or files. Propose fixes only as text.
+
+### `dc` (Dynamic Review)
+- **Role:** Extremely Strict QA Engineer
+- **Task:** Perform **end-to-end runtime verification** of the actual execution environment. This is NOT a unit-test or API-only check — every service layer touched by the change must be rebuilt, started, and verified through its **final consumer-facing output**. **[Bugfix Context]: If the previous command was `fix` or its `rr`, strictly execute the `how to reproduce` steps defined in `bugs.md` against the live environment to verify the bug is resolved.**
+- **Mandatory Verification Procedure (STRICT):**
+  1. **Clean rebuild:** Rebuild all services affected by the change from the current source tree (e.g., `docker compose up --build`, `npm run build`). Never trust a pre-existing build artifact — stale caches are a common source of false positives.
+  2. **Service startup confirmation:** Start all required services and confirm each one is healthy and accepting connections (health endpoints, process status, logs free of fatal errors).
+  3. **End-to-end consumer-path verification:** For every entry point that an end user or downstream service would access, issue an actual request through the **same path** the real consumer uses and validate that the response is structurally correct (e.g., expected status code, response body contains required content markers, no error traces). If a service returns rendered content, fetch and inspect the **rendered output** — do not assume correctness from upstream layers alone.
+  4. **Functional scenario execution:** Execute the CRUD / workflow scenarios relevant to the change through the consumer-facing path and confirm each operation produces the expected result.
+  5. **Failure evidence:** If any step produces unexpected output, capture the exact error or response excerpt and record it as a REJECTED finding.
+  6. **Faithful reproduction of user reports (STRICT / ANTI-HALLUCINATION):** When the user reports a problem (e.g., "localhost:3000 で白画面"), that report MUST be treated as an **absolute reproduction instruction**. Reproduce the issue using the **exact same URL, hostname, port, path, method, and steps** the user described — NEVER substitute, rewrite, or "normalize" any part of it (e.g., replacing `localhost` with `127.0.0.1`, changing the port, or altering query parameters). Any deviation from the user's literal report constitutes a hallucinated verification and invalidates the entire dc result. If the reported issue cannot be reproduced as described, record that fact explicitly — do not silently verify a different scenario and declare APPROVED.
+- **Append** all results (procedure, observations, verdict) to `review.md`.
+- **File Protection Rule (STRICT):** Except for writing to `review.md`, NEVER modify or add any existing source code or files.
+
+### `cp` (Commit & Push)
+- **Role:** Release Engineer
+- **Recommended Model:** GPT-5.4-mini
+- **Task:** Summarize current changes, create a Japanese commit message, and execute `git commit` and `git push`.
+- **File Protection Rule (STRICT):** Absolutely NEVER modify or add any existing source code or files.
+- **Prohibited:** Do not suggest the next command to execute after completion (the cycle ends here).
+
+### `del` (Environment Cleanup)
+- **Role:** Infrastructure Engineer
+- **Recommended Model:** GPT-5.4-mini
+- **Task:** Completely delete/cleanup execution environments like Docker containers, networks, and volumes started by `dc`.
+- **File Protection Rule (STRICT):** Absolutely NEVER modify or add any existing source code or files.
+
+---
+## Workflow Cycle
+`do ...` or `fix ...` ➡️ `sc` ➡️ `dc` ➡️ (If NG, go to `rr`) ➡️ Next `do ...` or `fix ...`

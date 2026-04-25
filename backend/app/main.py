@@ -5,7 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
-from app.routers import history, settings, stream
+from app.routers import history, settings, stream, templates
+from app.routers import knowledge
+from app.routers import workers
+from app.routers import query
 
 
 @asynccontextmanager
@@ -38,6 +41,10 @@ app.add_middleware(
 app.include_router(history.router)
 app.include_router(settings.router)
 app.include_router(stream.router)
+app.include_router(templates.router)
+app.include_router(knowledge.router)
+app.include_router(workers.router)
+app.include_router(query.router)
 
 
 @app.get("/health")
