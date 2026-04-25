@@ -38,6 +38,43 @@ function extractMessage(event: TraceEvent): { message: string; type: LogLine["ty
     return { message: thought, type: "progress" };
   }
   if (event.result) {
+    // Evaluate named lifecycle states first so stage-specific payloads that
+    // also carry an "error" field are rendered with their precise label
+    // rather than falling through to the generic error branch below.
+    const lifecycleStatus = (event.result as { status?: string }).status;
+    if (lifecycleStatus === "queued") {
+      return {
+        message: "⏳ キューに追加されました — プランナー起動を待機中",
+        type: "progress",
+      };
+    }
+    if (lifecycleStatus === "planner-started") {
+      return {
+        message: "⚙️ プランナーが起動しました — 推論中…",
+        type: "progress",
+      };
+    }
+    if (lifecycleStatus === "enqueue_failed") {
+      return {
+        message: "ERROR: タスクのキュー追加に失敗しました",
+        type: "error",
+      };
+    }
+    if (lifecycleStatus === "planner-failed") {
+      const errMsg = (event.result as { error?: string }).error ?? "";
+      return {
+        message: `ERROR: プランナーが失敗しました${errMsg ? ` — ${errMsg}` : ""}`,
+        type: "error",
+      };
+    }
+    if (lifecycleStatus === "orchestration-failed") {
+      const errMsg = (event.result as { error?: string }).error ?? "";
+      return {
+        message: `ERROR: オーケストレーションが失敗しました${errMsg ? ` — ${errMsg}` : ""}`,
+        type: "error",
+      };
+    }
+    // Generic fallback: non-lifecycle rows that carry an error field.
     if ((event.result as { error?: unknown }).error) {
       const err = (event.result as { error: unknown }).error;
       return {

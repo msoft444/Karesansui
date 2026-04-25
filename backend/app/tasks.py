@@ -377,6 +377,9 @@ def run_orchestration_pipeline(
     from app.schemas import ReportSynthesizerResponse as _ReportSynthesizerResponse
 
     db = _SessionLocal()
+    # Tracks which pipeline stage was active when a terminal exception occurs.
+    # Initialized before the try block so the outer except can always read it.
+    _pipeline_stage = "planner"
     try:
         settings = _load_settings(db)
         model: str = settings[_SETTING_MODEL]
@@ -396,6 +399,35 @@ def run_orchestration_pipeline(
         # Planner needs room for the full DAG JSON — use 4 × the agent token
         # budget but cap at 8192 to avoid overshooting model limits.
         planner_max_tokens = min(max_tokens * 4, 8192)
+
+        # Write planner-started lifecycle row so GET /history and
+        # GET /stream/progress surface the run state before the first
+        # structured-output call completes or fails.  Check for an existing
+        # row first so Celery retries do not create duplicates.
+        try:
+            from app.models import History as _HistoryPS
+            _ps_task_id = f"planner_started_{run_id}"
+            if not db.query(_HistoryPS).filter(
+                _HistoryPS.task_id == _ps_task_id
+            ).first():
+                db.add(_HistoryPS(
+                    run_id=run_id,
+                    task_id=_ps_task_id,
+                    role="Planner",
+                    result={"status": "planner-started"},
+                    progress=None,
+                ))
+                db.commit()
+        except Exception:
+            # Rollback the failed transaction so the same session remains
+            # usable for subsequent orchestration writes.
+            db.rollback()
+            logger.warning(
+                "[run_orchestration_pipeline] Could not persist planner-started row"
+                " for run_id=%s",
+                run_id,
+            )
+
         try:
             dag_schema_obj: _DagPayload = asyncio.run(
                 _generate_structured(
@@ -429,6 +461,10 @@ def run_orchestration_pipeline(
                 "[run_orchestration_pipeline] DAG validation error: %s", exc
             )
             raise self.retry(exc=exc, countdown=_backoff(self))
+
+        # Stages 1 (planner LLM) and 2 (DAG validation) have completed.
+        # From this point forward any terminal failure is orchestration-level.
+        _pipeline_stage = "orchestration"
 
         # --- Stage 3: Resolve the structured-output Pydantic model -----------
         try:
@@ -471,13 +507,18 @@ def run_orchestration_pipeline(
         # (not merely being retried by Celery).
         from celery.exceptions import Retry as _CeleryRetry
         if not isinstance(exc, _CeleryRetry):
+            # Use stage-specific status so history / live trace can distinguish
+            # planner failures from orchestration-level failures.
+            _terminal_status = (
+                "planner-failed" if _pipeline_stage == "planner" else "orchestration-failed"
+            )
             try:
                 from app.models import History as _History
                 db.add(_History(
                     run_id=run_id,
                     task_id=f"pipeline_failed_{run_id}",
                     role="Planner",
-                    result={"status": "failed", "error": str(exc)[:500]},
+                    result={"status": _terminal_status, "error": str(exc)[:500]},
                     progress=None,
                 ))
                 db.commit()
