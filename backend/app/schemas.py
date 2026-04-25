@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,62 @@ class MediatorResponse(BaseModel):
     consensus_reached: bool
     conclusion: str
     reasoning: str
+
+
+class ReportSynthesizerResponse(BaseModel):
+    """Structured output for Standard agents (Data_Gatherer, Logical_Analyst,
+    Critical_Reviewer, Report_Synthesizer, Translator, Persona_Writer, etc.).
+
+    ``summary`` holds the agent's main conclusion and ``details`` captures
+    supporting points, evidence, or reasoning steps.
+    """
+
+    summary: str
+    details: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Planner DAG structured-output schemas
+# ---------------------------------------------------------------------------
+
+class StandardTaskNode(BaseModel):
+    """A single Standard-type task node in the Planner's DAG output."""
+
+    task_id: str
+    task_type: Literal["Standard"]
+    role: str
+    parent_ids: list[str] = []
+    dynamic_params: dict[str, Any] = {}
+
+
+class DebateTaskNode(BaseModel):
+    """A single Debate-type task node in the Planner's DAG output."""
+
+    task_id: str
+    task_type: Literal["Debate"]
+    participants: list[str]
+    mediator: str
+    parent_ids: list[str] = []
+    dynamic_params: dict[str, Any] = {}
+
+
+DagTaskNode = Annotated[
+    Union[StandardTaskNode, DebateTaskNode],
+    Field(discriminator="task_type"),
+]
+
+
+class DagPayload(BaseModel):
+    """Structured output schema for the Planner agent.
+
+    The instructor library enforces this schema at the logits level so the
+    Planner always emits a well-formed DAG JSON, satisfying
+    requirement_specification.md §9 (JSON Schema constraints).
+    ``model_dump()`` on an instance produces the exact dict shape that
+    ``DagParser`` accepts.
+    """
+
+    tasks: list[DagTaskNode]
 
 
 # ---------------------------------------------------------------------------
@@ -227,3 +283,20 @@ class KnowledgeSearchResponse(BaseModel):
     """Top-K semantically similar chunks returned by a knowledge-base search."""
 
     results: list[KnowledgeChunkResult]
+
+
+# ---------------------------------------------------------------------------
+# Query submission schemas
+# ---------------------------------------------------------------------------
+
+
+class QueryRequest(BaseModel):
+    """Payload for submitting a new user query to the orchestration pipeline."""
+
+    query: str
+
+
+class QueryResponse(BaseModel):
+    """Response returned immediately after enqueuing a new orchestration run."""
+
+    run_id: str

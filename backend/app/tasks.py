@@ -8,8 +8,8 @@ backoff (countdown doubles on each attempt, starting at 2 seconds).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Type
 
@@ -278,6 +278,198 @@ def process_knowledge_document(
             _set_status(DocumentStatus.failed, error_message=str(exc))
         except Exception:
             pass
+        raise
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task: run_orchestration_pipeline
+# ---------------------------------------------------------------------------
+
+# Default Planner system prompt — instructs the LLM to output a strict DAG JSON.
+_PLANNER_SYSTEM_PROMPT = (
+    "You are the Planner agent in the Karesansui multi-agent system.\n"
+    "Analyze the user query and decompose it into a Directed Acyclic Graph (DAG) of tasks.\n\n"
+    "You MUST respond with a valid JSON object that contains exactly one top-level key 'tasks'\n"
+    "whose value is a non-empty array of task objects.  No markdown fences, no prose — pure JSON only.\n\n"
+    "Each task object MUST contain these fields:\n"
+    "  task_id       : a unique non-empty string identifying this task\n"
+    "  task_type     : exactly the string 'Standard' or 'Debate'\n"
+    "  parent_ids    : array of task_id strings this task depends on (empty array for root tasks)\n"
+    "  dynamic_params: object of arbitrary key/value pairs (use empty object {} if none)\n\n"
+    "For task_type=Standard also include:\n"
+    "  role          : one of: Data_Gatherer, Logical_Analyst, Critical_Reviewer, Report_Synthesizer, Translator\n\n"
+    "For task_type=Debate also include:\n"
+    "  participants  : non-empty array of role names chosen from: Advocate, Disrupter, Persona_Writer\n"
+    "  mediator      : exactly 'Mediator'\n\n"
+    "Do NOT include 'role' in Debate tasks. Do NOT include 'participants' or 'mediator' in Standard tasks.\n"
+    "Always end the DAG with a Report_Synthesizer or Persona_Writer task that synthesizes the final answer."
+)
+
+# Settings key names in the GlobalSettings table.
+_SETTING_MODEL = "model"
+_SETTING_TEMPERATURE = "temperature"
+_SETTING_MAX_TOKENS = "max_tokens"
+_SETTING_PLANNER_SYSTEM_PROMPT = "planner_system_prompt"
+_SETTING_RESPONSE_MODEL_CLASS_PATH = "response_model_class_path"
+
+
+def _load_settings(db: Any) -> dict[str, Any]:
+    """Read orchestration settings from the GlobalSettings table.
+
+    Returns a dict with keys: model, temperature, max_tokens,
+    planner_system_prompt, response_model_class_path.  Each key falls back to
+    a sensible default when absent from the DB.
+    """
+    import os as _os
+    from app.models import GlobalSettings as _GS
+
+    defaults: dict[str, Any] = {
+        _SETTING_MODEL: _os.environ.get("INFERENCE_MODEL", "karesansui"),
+        _SETTING_TEMPERATURE: 0.0,
+        _SETTING_MAX_TOKENS: 2048,
+        _SETTING_PLANNER_SYSTEM_PROMPT: _PLANNER_SYSTEM_PROMPT,
+        _SETTING_RESPONSE_MODEL_CLASS_PATH: "app.schemas.ReportSynthesizerResponse",
+    }
+    for key in list(defaults.keys()):
+        row = db.get(_GS, key)
+        if row is not None:
+            defaults[key] = row.value
+    return defaults
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    name="app.tasks.run_orchestration_pipeline",
+)
+def run_orchestration_pipeline(
+    self: Task,
+    *,
+    user_query: str,
+    run_id: str,
+) -> dict[str, Any]:
+    """Run the full orchestration pipeline for a user query.
+
+    Stages:
+        1. Load inference settings from GlobalSettings (with defaults).
+        2. Call the Planner LLM to generate a DAG JSON.
+        3. Parse and validate the DAG with DagParser.
+        4. Execute all tasks via OrchestratorManager (blocks until done).
+
+    The *run_id* is supplied by the HTTP endpoint so the caller can redirect
+    the user to the Live Trace view before execution completes.
+
+    Args:
+        user_query: The raw user query string.
+        run_id:     Pre-assigned run identifier returned to the frontend.
+
+    Returns:
+        Dict with ``run_id`` and a ``task_results`` mapping on success.
+    """
+    from app.database import SessionLocal as _SessionLocal
+    from app.llm.structured_output import generate_structured as _generate_structured
+    from app.orchestrator.dag_parser import DagParser as _DagParser
+    from app.orchestrator.manager import OrchestratorManager as _OrchestratorManager
+    from app.schemas import DagPayload as _DagPayload
+    from app.schemas import ReportSynthesizerResponse as _ReportSynthesizerResponse
+
+    db = _SessionLocal()
+    try:
+        settings = _load_settings(db)
+        model: str = settings[_SETTING_MODEL]
+        temperature: float = float(settings[_SETTING_TEMPERATURE])
+        max_tokens: int = int(settings[_SETTING_MAX_TOKENS])
+        planner_prompt: str = settings[_SETTING_PLANNER_SYSTEM_PROMPT]
+        response_class_path: str = settings[_SETTING_RESPONSE_MODEL_CLASS_PATH]
+
+        # --- Stage 1: Invoke the Planner LLM to produce a structured DAG ----
+        # Use generate_structured() with DagPayload as the response model so
+        # the instructor library enforces the DAG JSON schema at the logits
+        # level, satisfying requirement_specification.md §9 (Error Handling).
+        planner_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": planner_prompt},
+            {"role": "user", "content": user_query},
+        ]
+        # Planner needs room for the full DAG JSON — use 4 × the agent token
+        # budget but cap at 8192 to avoid overshooting model limits.
+        planner_max_tokens = min(max_tokens * 4, 8192)
+        try:
+            dag_schema_obj: _DagPayload = asyncio.run(
+                _generate_structured(
+                    model=model,
+                    messages=planner_messages,
+                    response_model=_DagPayload,
+                    temperature=0.0,  # Deterministic planning
+                    max_tokens=planner_max_tokens,
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "[run_orchestration_pipeline] Planner structured generation failed: %s", exc
+            )
+            raise self.retry(exc=exc, countdown=_backoff(self))
+
+        logger.info(
+            "[run_orchestration_pipeline] Planner produced %d task(s)",
+            len(dag_schema_obj.tasks),
+        )
+
+        # --- Stage 2: Parse and validate the DAG ----------------------------
+        # Convert the Pydantic DagPayload back to a plain dict so DagParser
+        # can validate cross-references and detect cycles as usual.
+        dag_payload: dict[str, Any] = dag_schema_obj.model_dump()
+        try:
+            parser = _DagParser(dag_payload)
+            nodes = parser.topological_sort()
+        except Exception as exc:
+            logger.error(
+                "[run_orchestration_pipeline] DAG validation error: %s", exc
+            )
+            raise self.retry(exc=exc, countdown=_backoff(self))
+
+        # --- Stage 3: Resolve the structured-output Pydantic model -----------
+        try:
+            module_path, class_name = response_class_path.rsplit(".", 1)
+            import importlib as _importlib
+            _module = _importlib.import_module(module_path)
+            response_model_cls = getattr(_module, class_name)
+            response_model_schema = response_model_cls.model_json_schema()
+        except Exception as exc:
+            logger.warning(
+                "[run_orchestration_pipeline] Could not resolve response model %r, "
+                "falling back to ReportSynthesizerResponse: %s",
+                response_class_path,
+                exc,
+            )
+            response_model_cls = _ReportSynthesizerResponse
+            response_model_schema = _ReportSynthesizerResponse.model_json_schema()
+            response_class_path = "app.schemas.ReportSynthesizerResponse"
+
+        # --- Stage 4: Execute all tasks via OrchestratorManager --------------
+        manager = _OrchestratorManager(
+            model=model,
+            response_model_class_path=response_class_path,
+            response_model_schema=response_model_schema,
+            task_timeout=float(os.environ.get("ORCHESTRATOR_TASK_TIMEOUT", "300")),
+            db_session=db,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        task_results = manager.run(nodes, user_query, run_id=run_id)
+        logger.info(
+            "[run_orchestration_pipeline] run_id=%s completed with %d tasks",
+            run_id,
+            len(task_results),
+        )
+        return {"run_id": run_id, "task_results": task_results}
+
+    except Exception as exc:
+        logger.exception(
+            "[run_orchestration_pipeline] Pipeline failed for run_id=%s", run_id
+        )
         raise
 
     finally:

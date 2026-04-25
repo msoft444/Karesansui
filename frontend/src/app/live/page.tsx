@@ -1,11 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import LiveTrace from "../../components/LiveTrace";
 
-export default function LivePage() {
-  const [inputRunId, setInputRunId] = useState("");
-  const [activeRunId, setActiveRunId] = useState("");
+function LivePageContent() {
+  const searchParams = useSearchParams();
+  const runIdFromQuery = searchParams.get("run_id")?.trim() ?? "";
+
+  const [inputRunId, setInputRunId] = useState(runIdFromQuery);
+  const [activeRunId, setActiveRunId] = useState(runIdFromQuery);
+
+  useEffect(() => {
+    if (!runIdFromQuery) {
+      return;
+    }
+
+    setInputRunId(runIdFromQuery);
+    setActiveRunId(runIdFromQuery);
+  }, [runIdFromQuery]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,5 +67,19 @@ export default function LivePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function LivePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center p-6 text-sm text-gray-500">
+          ライブトレースを読み込み中...
+        </div>
+      }
+    >
+      <LivePageContent />
+    </Suspense>
   );
 }

@@ -116,6 +116,8 @@ class OrchestratorManager:
         self,
         nodes: list[DagNode],
         user_query: str,
+        *,
+        run_id: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Execute all *nodes* in topological order, returning a mapping of
         ``task_id → result``.
@@ -128,17 +130,20 @@ class OrchestratorManager:
         user_query:
             The original user query injected as the first human message for
             root tasks (nodes with no parents).
+        run_id:
+            Optional externally-provided run identifier.  When supplied (e.g.
+            by the ``/api/query/`` endpoint so it can return the id
+            immediately), this value is used instead of a freshly generated
+            one.  If ``None``, a new UUID hex string is generated.
 
         Returns
         -------
         dict[str, dict[str, Any]]
             Mapping of ``task_id`` to the structured result dict.
         """
-        # Generate a unique run identifier shared by every History row
-        # produced during this orchestration invocation.  This allows the
-        # frontend DAG visualiser to precisely filter node history rows by
-        # run without relying on time-window heuristics.
-        run_id = uuid.uuid4().hex
+        # Use the caller-supplied run_id when provided so the HTTP endpoint
+        # can return it before orchestration completes; otherwise generate one.
+        run_id = run_id if run_id is not None else uuid.uuid4().hex
 
         # Persist the Planner DAG topology so the management console can
         # reconstruct and visualise the full graph for this run.
