@@ -46,6 +46,11 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://karesansui:changeme@db:5432/karesansui}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Inference server address — routed to the Docker host via the host-gateway alias.
+      # The host inference server (e.g. mlx_lm or llama.cpp on port 8000) MUST be running
+      # before orchestration tasks can succeed.  When unreachable, the worker persists a
+      # planner-failed / orchestration-failed History record tagged with error_type=connectivity.
+      # Override by setting INFERENCE_API_BASE_URL in the environment or a .env file.
       INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       GITHUB_REPO: ${GITHUB_REPO}
@@ -76,6 +81,9 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://karesansui:changeme@db:5432/karesansui}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Same inference server address as the backend service above.  The worker container
+      # resolves host.docker.internal via the extra_hosts entry below.
+      # Override by setting INFERENCE_API_BASE_URL in the environment or a .env file.
       INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       GITHUB_REPO: ${GITHUB_REPO}

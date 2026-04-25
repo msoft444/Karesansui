@@ -7,6 +7,7 @@ import useSWR from "swr";
 // HistoryRecord mirrors the HistoryResponse schema from the backend
 interface HistoryRecord {
   id: string;
+  run_id: string | null;
   task_id: string;
   role: string;
   result: Record<string, unknown> | null;
@@ -23,6 +24,38 @@ const fetcher = async (url: string) => {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };
+
+function getLifecycleLabel(
+  status: string,
+): { label: string; className: string } | null {
+  const map: Record<string, { label: string; className: string }> = {
+    queued: {
+      label: "待機中",
+      className: "border-yellow-700/60 bg-yellow-900/40 text-yellow-300",
+    },
+    "planner-started": {
+      label: "プランナー起動中",
+      className: "border-blue-700/60 bg-blue-900/40 text-blue-300",
+    },
+    enqueue_failed: {
+      label: "キュー失敗",
+      className: "border-red-700/60 bg-red-900/40 text-red-300",
+    },
+    "planner-failed": {
+      label: "プランナー失敗",
+      className: "border-red-700/60 bg-red-900/40 text-red-300",
+    },
+    "orchestration-failed": {
+      label: "オーケストレーション失敗",
+      className: "border-red-700/60 bg-red-900/40 text-red-300",
+    },
+    failed: {
+      label: "失敗",
+      className: "border-red-700/60 bg-red-900/40 text-red-300",
+    },
+  };
+  return map[status] ?? null;
+}
 
 export default function DashboardPage() {
   const [query, setQuery] = useState("");
@@ -226,16 +259,40 @@ export default function DashboardPage() {
 
                       {/* Result preview */}
                       <td className="max-w-[340px] px-4 py-3">
-                        <span
-                          className="block truncate font-mono text-xs text-gray-500"
-                          title={record.result ? JSON.stringify(record.result) : undefined}
-                        >
-                          {record.result ? (
-                            JSON.stringify(record.result).slice(0, 120)
-                          ) : (
-                            <span className="text-gray-700">—</span>
-                          )}
-                        </span>
+                        {(() => {
+                          if (!record.result) {
+                            return (
+                              <span className="font-mono text-xs text-gray-700">
+                                —
+                              </span>
+                            );
+                          }
+                          const statusStr =
+                            typeof (record.result as { status?: unknown }).status ===
+                            "string"
+                              ? (record.result as { status: string }).status
+                              : null;
+                          const lifecycle = statusStr
+                            ? getLifecycleLabel(statusStr)
+                            : null;
+                          if (lifecycle) {
+                            return (
+                              <span
+                                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${lifecycle.className}`}
+                              >
+                                {lifecycle.label}
+                              </span>
+                            );
+                          }
+                          return (
+                            <span
+                              className="block truncate font-mono text-xs text-gray-500"
+                              title={JSON.stringify(record.result)}
+                            >
+                              {JSON.stringify(record.result).slice(0, 120)}
+                            </span>
+                          );
+                        })()}
                       </td>
 
                       {/* Timestamp */}

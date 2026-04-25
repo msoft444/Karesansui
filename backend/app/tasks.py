@@ -113,10 +113,21 @@ def run_structured_inference(
             },
         }
 
-    # Transient connection failures → retry with exponential backoff
+    # Transient connection and schema-validation failures → retry with exponential backoff.
+    # generate_structured() normalises all InstructorRetryException / APIConnectionError
+    # variants into RuntimeError with a known prefix, so both categories are caught here:
+    #   "[structured_output] connectivity-failure: ..."
+    #   "[inference_client] Connection failed: ..."          (unchanged in inference_client.py)
+    #   "... timed out ..."                                  (timeout messages still contain this)
+    #   "[structured_output] schema-validation-failure: ..."  (replaces raw InstructorRetryException)
     except RuntimeError as exc:
         error_msg = str(exc)
-        if "Connection failed" in error_msg or "timed out" in error_msg:
+        if (
+            "connectivity-failure" in error_msg
+            or "Connection failed" in error_msg
+            or "timed out" in error_msg
+            or "schema-validation-failure" in error_msg
+        ):
             logger.warning(
                 "[run_structured_inference] Transient error (attempt %d/%d): %s",
                 self.request.retries + 1,
@@ -126,7 +137,8 @@ def run_structured_inference(
             raise self.retry(exc=exc, countdown=_backoff(self))
         raise
 
-    # JSON / schema validation failures from instructor → retry with backoff
+    # Defensive fallback: catch any raw InstructorRetryException / ValidationError
+    # that somehow bypasses generate_structured()'s normalisation layer.
     except Exception as exc:  # noqa: BLE001
         exc_name = type(exc).__name__
         if "InstructorRetryException" in exc_name or "ValidationError" in exc_name:
@@ -377,6 +389,9 @@ def run_orchestration_pipeline(
     from app.schemas import ReportSynthesizerResponse as _ReportSynthesizerResponse
 
     db = _SessionLocal()
+    # Tracks which pipeline stage was active when a terminal exception occurs.
+    # Initialized before the try block so the outer except can always read it.
+    _pipeline_stage = "planner"
     try:
         settings = _load_settings(db)
         model: str = settings[_SETTING_MODEL]
@@ -396,6 +411,35 @@ def run_orchestration_pipeline(
         # Planner needs room for the full DAG JSON — use 4 × the agent token
         # budget but cap at 8192 to avoid overshooting model limits.
         planner_max_tokens = min(max_tokens * 4, 8192)
+
+        # Write planner-started lifecycle row so GET /history and
+        # GET /stream/progress surface the run state before the first
+        # structured-output call completes or fails.  Check for an existing
+        # row first so Celery retries do not create duplicates.
+        try:
+            from app.models import History as _HistoryPS
+            _ps_task_id = f"planner_started_{run_id}"
+            if not db.query(_HistoryPS).filter(
+                _HistoryPS.task_id == _ps_task_id
+            ).first():
+                db.add(_HistoryPS(
+                    run_id=run_id,
+                    task_id=_ps_task_id,
+                    role="Planner",
+                    result={"status": "planner-started"},
+                    progress=None,
+                ))
+                db.commit()
+        except Exception:
+            # Rollback the failed transaction so the same session remains
+            # usable for subsequent orchestration writes.
+            db.rollback()
+            logger.warning(
+                "[run_orchestration_pipeline] Could not persist planner-started row"
+                " for run_id=%s",
+                run_id,
+            )
+
         try:
             dag_schema_obj: _DagPayload = asyncio.run(
                 _generate_structured(
@@ -429,6 +473,10 @@ def run_orchestration_pipeline(
                 "[run_orchestration_pipeline] DAG validation error: %s", exc
             )
             raise self.retry(exc=exc, countdown=_backoff(self))
+
+        # Stages 1 (planner LLM) and 2 (DAG validation) have completed.
+        # From this point forward any terminal failure is orchestration-level.
+        _pipeline_stage = "orchestration"
 
         # --- Stage 3: Resolve the structured-output Pydantic model -----------
         try:
@@ -467,6 +515,43 @@ def run_orchestration_pipeline(
         return {"run_id": run_id, "task_results": task_results}
 
     except Exception as exc:
+        # Only write a terminal-failure row when the pipeline is truly dead
+        # (not merely being retried by Celery).
+        from celery.exceptions import Retry as _CeleryRetry
+        if not isinstance(exc, _CeleryRetry):
+            # Use stage-specific status so history / live trace can distinguish
+            # planner failures from orchestration-level failures.
+            _terminal_status = (
+                "planner-failed" if _pipeline_stage == "planner" else "orchestration-failed"
+            )
+            # Classify the error type so consumers can distinguish connectivity
+            # problems from schema-validation failures without parsing the error string.
+            _err_msg = str(exc)
+            if "connectivity-failure" in _err_msg or "Connection failed" in _err_msg:
+                _error_type = "connectivity"
+            elif "schema-validation-failure" in _err_msg:
+                _error_type = "validation"
+            else:
+                _error_type = "inference"
+            try:
+                from app.models import History as _History
+                db.add(_History(
+                    run_id=run_id,
+                    task_id=f"pipeline_failed_{run_id}",
+                    role="Planner",
+                    result={
+                        "status": _terminal_status,
+                        "error": _err_msg[:800],
+                        "error_type": _error_type,
+                    },
+                    progress=None,
+                ))
+                db.commit()
+            except Exception:
+                logger.exception(
+                    "[run_orchestration_pipeline] Could not persist failure row for run_id=%s",
+                    run_id,
+                )
         logger.exception(
             "[run_orchestration_pipeline] Pipeline failed for run_id=%s", run_id
         )
