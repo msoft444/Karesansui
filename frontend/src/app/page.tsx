@@ -19,6 +19,13 @@ interface QueryResponse {
   run_id: string;
 }
 
+interface DiagnosticsResponse {
+  inference_backend_reachable: boolean;
+  inference_backend_url: string;
+  error: string | null;
+  checked_at: string;
+}
+
 const fetcher = async (url: string) => {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -68,6 +75,12 @@ export default function DashboardPage() {
     "/api/history",
     fetcher,
     { refreshInterval: 5000 }
+  );
+
+  const { data: diagnostics } = useSWR<DiagnosticsResponse>(
+    "/api/workers/diagnostics",
+    fetcher,
+    { refreshInterval: 15000 }
   );
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -122,6 +135,22 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6">
+      {/* Inference backend status banner — shown only when unavailable */}
+      {diagnostics && !diagnostics.inference_backend_reachable && (
+        <div className="rounded-xl border border-amber-500/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+          <p className="font-semibold">⚠️ 推論バックエンドに接続できません</p>
+          <p className="mt-1 text-xs text-amber-300/80">
+            URL: <span className="font-mono">{diagnostics.inference_backend_url}</span>
+          </p>
+          {diagnostics.error && (
+            <p className="mt-1 text-xs text-amber-400/70 font-mono">{diagnostics.error}</p>
+          )}
+          <p className="mt-2 text-xs text-amber-300/70">
+            タスクを送信してもプランナーが失敗します。推論サーバーを起動してから再試行してください。
+          </p>
+        </div>
+      )}
+
       <section className="rounded-2xl border border-gray-800 bg-gray-950/80 p-5 shadow-lg shadow-black/20">
         <div className="mb-4">
           <h1 className="text-2xl font-bold text-gray-100">新しいクエリを実行</h1>
@@ -276,12 +305,33 @@ export default function DashboardPage() {
                             ? getLifecycleLabel(statusStr)
                             : null;
                           if (lifecycle) {
+                            const res = record.result as {
+                              error_type?: string;
+                              error?: string;
+                            };
+                            const isConnectivity = res.error_type === "connectivity";
+                            const errMsg = res.error;
                             return (
-                              <span
-                                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${lifecycle.className}`}
-                              >
-                                {lifecycle.label}
-                              </span>
+                              <div className="flex flex-col gap-1">
+                                <span
+                                  className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium w-fit ${lifecycle.className}`}
+                                >
+                                  {lifecycle.label}
+                                </span>
+                                {isConnectivity && (
+                                  <span className="text-xs text-amber-400">
+                                    推論バックエンドに接続できません — ワーカー管理画面で状態を確認してください
+                                  </span>
+                                )}
+                                {errMsg && !isConnectivity && (
+                                  <span
+                                    className="block truncate font-mono text-xs text-red-400/70"
+                                    title={errMsg}
+                                  >
+                                    {errMsg.slice(0, 100)}
+                                  </span>
+                                )}
+                              </div>
                             );
                           }
                           return (

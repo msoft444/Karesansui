@@ -31,6 +31,13 @@ type TasksResponse = {
   reserved?: TaskItem[];
 };
 
+type DiagnosticsResponse = {
+  inference_backend_reachable: boolean;
+  inference_backend_url: string;
+  error: string | null;
+  checked_at: string;
+};
+
 export default function WorkersPage() {
   const { data: workers, error: workersError, isLoading: workersLoading, mutate: mutateWorkers } = useSWR<Worker[]>(
     "/api/workers",
@@ -42,6 +49,12 @@ export default function WorkersPage() {
     "/api/workers/tasks",
     fetcher,
     { refreshInterval: 3000 }
+  );
+
+  const { data: diagnostics, isLoading: diagnosticsLoading } = useSWR<DiagnosticsResponse>(
+    "/api/workers/diagnostics",
+    fetcher,
+    { refreshInterval: 15000 }
   );
 
   const [revoking, setRevoking] = useState<string | null>(null);
@@ -77,6 +90,40 @@ export default function WorkersPage() {
           {message}
         </div>
       )}
+
+      {/* Inference backend diagnostics */}
+      <section className="mb-6">
+        <h2 className="text-lg font-semibold text-gray-100 mb-3">推論バックエンド</h2>
+        {diagnosticsLoading && <div className="text-gray-400 text-sm">確認中...</div>}
+        {diagnostics && (
+          <div className={`p-4 rounded-lg border text-sm ${
+            diagnostics.inference_backend_reachable
+              ? "bg-emerald-950/20 border-emerald-700/40"
+              : "bg-red-950/30 border-red-700/50"
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                diagnostics.inference_backend_reachable ? "bg-emerald-400" : "bg-red-500"
+              }`} />
+              <span className={diagnostics.inference_backend_reachable ? "text-emerald-300 font-medium" : "text-red-300 font-medium"}>
+                {diagnostics.inference_backend_reachable ? "接続可能" : "接続不可"}
+              </span>
+            </div>
+            <div className="mt-2 text-xs text-gray-400 space-y-1">
+              <div>URL: <span className="font-mono text-gray-300">{diagnostics.inference_backend_url}</span></div>
+              {diagnostics.error && (
+                <div className="text-red-400/80 font-mono">{diagnostics.error}</div>
+              )}
+              {!diagnostics.inference_backend_reachable && (
+                <div className="mt-2 text-amber-300/80">
+                  タスクを送信するとプランナーが失敗します。推論サーバーを起動してから再試行してください。
+                </div>
+              )}
+              <div className="text-gray-600">確認時刻: {new Date(diagnostics.checked_at).toLocaleString("ja-JP")}</div>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* Workers list */}
       <section className="mb-6">

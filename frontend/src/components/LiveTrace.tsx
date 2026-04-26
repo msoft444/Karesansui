@@ -61,9 +61,14 @@ function extractMessage(event: TraceEvent): { message: string; type: LogLine["ty
       };
     }
     if (lifecycleStatus === "planner-failed") {
-      const errMsg = (event.result as { error?: string }).error ?? "";
+      const result = event.result as { error?: string; error_type?: string };
+      const errMsg = result.error ?? "";
+      const isConnectivity = result.error_type === "connectivity";
+      const hint = isConnectivity
+        ? " ／ 推論バックエンドの起動と疎通を確認してください（ワーカー管理画面を参照）"
+        : "";
       return {
-        message: `ERROR: プランナーが失敗しました${errMsg ? ` — ${errMsg}` : ""}`,
+        message: `ERROR: プランナーが失敗しました${errMsg ? ` — ${errMsg}` : ""}${hint}`,
         type: "error",
       };
     }
