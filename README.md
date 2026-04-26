@@ -50,27 +50,16 @@ python3 -m mlx_lm server --model prism-ml/Ternary-Bonsai-8B-mlx-2bit --port 8000
 
 > **注意:** サーバーを停止すると推論が止まります。Karesansui のコンテナ起動前に必ずサーバーを起動しておいてください。
 
-### 1-3. 推論サーバーの疎通確認 (Verifying Reachability)
+### 1-3. ホスト側疎通確認 (Host-side Reachability Check)
 
-タスクを投入する前に、以下のコマンドで推論サーバーへの接続を確認してください。
+推論サーバーを起動したら、ホスト側から接続できることを確認してください。
 
-**ホスト側から確認:**
 ```bash
 curl -s http://localhost:8000/v1/models | head -c 300
 ```
 
-**コンテナ (backend) 側から確認:**
-```bash
-docker compose exec backend python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
-```
-
-**コンテナ (worker) 側から確認:**
-```bash
-docker compose exec worker python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
-```
-
-いずれのコマンドも `{"object":"list","data":[...]}` 形式の JSON を返すことを確認してください。  
-接続できない場合、ワーカーは `error_type=connectivity` タグ付きの `pipeline_failed_<run_id>` 履歴レコードを書き込み、タスクは Planner 段階で停止します。
+`{"object":"list","data":[...]}` 形式の JSON が返れば OK です。  
+コンテナ (backend/worker) 側からの疎通確認はドッカーサービス起動後にステップ 3-C で行います。
 
 ---
 
@@ -106,7 +95,7 @@ docker compose logs -f backend
 
 ## ステップ 3-B: フロントエンドの起動 (Frontend)
 
-> **重要:** Next.js の `rewrites()` はビルド時に評価されます。`npm run build` の **前に** `API_BASE_URL` を設定してください。
+> **重要:** `frontend/package.json` の `prestart` フックが `next build` を自動実行します。`API_BASE_URL` (ビルド時に `next.config.js` の `rewrites()` 先として評価) は **`npm run start` と同時に設定する必要があります**。先に `npm run build` を実行しても `npm run start` 時に再ビルドされるため、必ず以下のいずれかの方法で起動してください。
 
 ```bash
 cd frontend
@@ -114,20 +103,57 @@ cd frontend
 # Install dependencies (初回のみ)
 npm install
 
-# Build (API_BASE_URL を明示して build)
-API_BASE_URL=http://localhost:8001 npm run build
-
-# Start production server
-npm run start
+# Build & Start — prestart フックが API_BASE_URL 付きで next build を自動実行
+API_BASE_URL=http://localhost:8001 npm run start
 ```
 
-ローカル開発時は `.env.local` で設定することもできます:
+`.env.local` を使う場合は先に設定してから `npm run start` のみ実行します:
 ```bash
 echo 'API_BASE_URL=http://localhost:8001' > frontend/.env.local
-cd frontend && npm run build && npm run start
+cd frontend && npm run start
 ```
 
 フロントエンドは `http://localhost:3000` で起動します。
+
+---
+
+## ステップ 3-C: タスク投入前の事前確認 (Pre-submission Checklist)
+
+以下をすべて確認してから `http://localhost:3000/` でタスクを投入してください。
+
+**起動順序チェックリスト:**
+
+| # | 確認内容 | 完了条件 |
+|---|---|---|
+| 1 | ホスト推論サーバー起動済み (ステップ 1-2) | `curl -s http://localhost:8000/v1/models` が JSON を返す |
+| 2 | Docker サービス起動済み (ステップ 3) | `docker compose ps` で `backend`, `worker`, `db`, `redis` が `Up` |
+| 3 | フロントエンド起動済み (ステップ 3-B) | `curl -sI http://localhost:3000/` が `HTTP/1.1 200` を返す |
+| 4 | コンテナ側疎通確認 OK (本ステップ) | 以下のコマンドが JSON を返す |
+
+**コンテナ (backend) 側から疎通確認:**
+```bash
+docker compose exec backend python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
+```
+
+**コンテナ (worker) 側から疎通確認:**
+```bash
+docker compose exec worker python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=5).read(300).decode())"
+```
+
+いずれも `{"object":"list","data":[...]}` 形式の JSON が返れば OK です。
+
+**障害シグネチャ (Failure Signatures):**
+
+| 確認場所 | 出力 | 原因 | 対処 |
+|---|---|---|---|
+| ホスト `curl` | `curl: (7) Failed to connect to localhost port 8000` | ホスト推論プロセスが停止 | ステップ 1-2 のコマンドで再起動 |
+| コンテナ `python3` | `OSError: [Errno 101] Network is unreachable` | `host.docker.internal` ルーティング不可 | Docker Desktop の設定確認、`docker-compose.yml` の `extra_hosts` 確認 |
+| コンテナ `python3` | `urllib.error.URLError: <urlopen error [Errno 61] Connection refused>` | コンテナから `host.docker.internal` は到達できるがホスト推論プロセスが停止 | ステップ 1-2 のコマンドで再起動 |
+| コンテナ `python3` | `urllib.error.HTTPError: HTTP Error 4xx / 5xx` またはレスポンスが JSON 以外 | 推論サーバーは起動中だがモデル未ロードまたは API エラー（application-layer 障害） | 推論サーバーのログを確認し、モデルが正常にロードされているかを検証 |
+| コンテナ `python3` | `{"object":"list","data":[...]}` | **正常** | タスク投入可 |
+
+> **上記確認をスキップしてタスクを投入すると**、ワーカーは `error_type=connectivity` タグ付きの `pipeline_failed_<run_id>` 履歴レコードを書き込み、タスクは Planner 段階で停止します。  
+> Workers ページの診断パネルおよびダッシュボードのバナーでも推論バックエンドの到達可否を確認できます。
 
 ---
 
