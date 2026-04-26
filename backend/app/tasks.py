@@ -31,6 +31,72 @@ def _backoff(self: Task) -> int:
     return _BASE_RETRY_COUNTDOWN_SECONDS * (2 ** self.request.retries)
 
 
+def _check_inference_backend_reachable(base_url: str, timeout: float = 5.0) -> None:
+    """Probe the inference backend with a cheap GET to /models.
+
+    Uses only stdlib so this runs inside the python:3.11-slim worker image
+    without any additional dependencies.
+
+    The function returns normally (does NOT raise) when the backend is
+    reachable in any of the following ways:
+    - The request succeeds with a 2xx response.
+    - The backend returns an HTTP error (4xx/5xx) — an HTTP response at any
+      status means the TCP stack is up and the process is listening.
+    - The probe times out — a slow or cold-start backend might not answer
+      ``/models`` within the probe window but could still serve inference;
+      the actual structured-output call will surface the correct failure class.
+
+    Only a network-level failure (connection refused, network unreachable,
+    DNS failure, etc.) raises RuntimeError with ``"[preflight] connectivity-failure"``
+    so callers can classify without inspecting the raw exception.
+
+    Args:
+        base_url: The inference API base URL (e.g. ``http://host.docker.internal:8000/v1``).
+        timeout:  Connection + read timeout in seconds for the probe (default 5).
+
+    Raises:
+        RuntimeError: with ``"[preflight] connectivity-failure: ..."`` prefix when the
+            backend cannot be reached at the network layer.
+    """
+    import os as _os
+    import socket as _socket
+    import urllib.error
+    import urllib.request
+
+    api_key: str = _os.environ.get("INFERENCE_API_KEY", "not-required")
+    url = base_url.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout):
+            pass
+    except urllib.error.HTTPError:
+        # An HTTP error response (4xx/5xx) means the backend process is
+        # accepting connections — not a connectivity failure.
+        pass
+    except urllib.error.URLError as exc:
+        # A probe timeout means the backend is slow or cold-starting.
+        # Let the actual inference request (with its full 120 s timeout)
+        # determine the correct failure class rather than misclassifying
+        # a slow-but-reachable server as connectivity-failure.
+        if isinstance(exc.reason, (_socket.timeout, TimeoutError)):
+            return
+        # Any other URLError (connection refused, network unreachable,
+        # DNS failure, etc.) is a genuine network-layer failure.
+        raise RuntimeError(
+            f"[preflight] connectivity-failure: inference backend unreachable"
+            f" — url={base_url}, error={exc}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"[preflight] connectivity-failure: inference backend unreachable"
+            f" — url={base_url}, error={exc}"
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Task: run_structured_inference
 # ---------------------------------------------------------------------------
@@ -441,6 +507,18 @@ def run_orchestration_pipeline(
                 run_id,
             )
 
+        # --- Preflight: verify the inference backend is reachable -----------
+        # A cheap GET /models probe runs before any structured inference so
+        # a connectivity failure is classified immediately rather than after
+        # repeated opaque Celery retries.  The raised RuntimeError propagates
+        # directly to the outer except block (no self.retry()) so a single
+        # deterministic pipeline_failed_<run_id> row is written on the first
+        # attempt.
+        _inference_base_url: str = os.environ.get(
+            "INFERENCE_API_BASE_URL", "http://host.docker.internal:8000/v1"
+        )
+        _check_inference_backend_reachable(_inference_base_url)
+
         try:
             dag_schema_obj: _DagPayload = asyncio.run(
                 _generate_structured(
@@ -452,6 +530,18 @@ def run_orchestration_pipeline(
                 )
             )
         except Exception as exc:
+            _err_str = str(exc)
+            if "connectivity-failure" in _err_str:
+                # Connectivity failure during the Planner request — no retry;
+                # propagate directly so the outer handler writes exactly one
+                # terminal pipeline_failed_<run_id> row.
+                logger.error(
+                    "[run_orchestration_pipeline] Planner connectivity failure"
+                    " (run_id=%s): %s",
+                    run_id,
+                    _err_str,
+                )
+                raise
             logger.error(
                 "[run_orchestration_pipeline] Planner structured generation failed: %s", exc
             )
@@ -516,10 +606,23 @@ def run_orchestration_pipeline(
         return {"run_id": run_id, "task_results": task_results}
 
     except Exception as exc:
-        # Only write a terminal-failure row when the pipeline is truly dead
-        # (not merely being retried by Celery).
+        # Write a terminal-failure row when the pipeline is truly dead.
+        # Conditions for writing:
+        #   (a) exc is NOT a Celery Retry (e.g. plain RuntimeError from preflight
+        #       or connectivity failure that bypassed self.retry()), OR
+        #   (b) exc IS MaxRetriesExceededError (all retries exhausted for schema
+        #       validation / non-connectivity failures).
+        # Regular Retry exceptions (mid-retry, not final) are always skipped.
         from celery.exceptions import Retry as _CeleryRetry
-        if not isinstance(exc, _CeleryRetry):
+        try:
+            from celery.exceptions import MaxRetriesExceededError as _MaxRetries
+        except ImportError:
+            _MaxRetries = type(None)  # type: ignore[assignment]
+
+        _is_transient_retry = (
+            isinstance(exc, _CeleryRetry) and not isinstance(exc, _MaxRetries)
+        )
+        if not _is_transient_retry:
             # Use stage-specific status so history / live trace can distinguish
             # planner failures from orchestration-level failures.
             _terminal_status = (
@@ -528,7 +631,11 @@ def run_orchestration_pipeline(
             # Classify the error type so consumers can distinguish connectivity
             # problems from schema-validation failures without parsing the error string.
             _err_msg = str(exc)
-            if "connectivity-failure" in _err_msg or "Connection failed" in _err_msg:
+            if (
+                "connectivity-failure" in _err_msg
+                or "Connection failed" in _err_msg
+                or "[preflight]" in _err_msg
+            ):
                 _error_type = "connectivity"
             elif "schema-validation-failure" in _err_msg:
                 _error_type = "validation"
@@ -536,18 +643,25 @@ def run_orchestration_pipeline(
                 _error_type = "inference"
             try:
                 from app.models import History as _History
-                db.add(_History(
-                    run_id=run_id,
-                    task_id=f"pipeline_failed_{run_id}",
-                    role="Planner",
-                    result={
-                        "status": _terminal_status,
-                        "error": _err_msg[:800],
-                        "error_type": _error_type,
-                    },
-                    progress=None,
-                ))
-                db.commit()
+                _fail_task_id = f"pipeline_failed_{run_id}"
+                # Guard against duplicate rows when the task is replayed or when
+                # MaxRetriesExceededError fires after earlier retries already wrote
+                # a partial failure record.
+                if not db.query(_History).filter(
+                    _History.task_id == _fail_task_id
+                ).first():
+                    db.add(_History(
+                        run_id=run_id,
+                        task_id=_fail_task_id,
+                        role="Planner",
+                        result={
+                            "status": _terminal_status,
+                            "error": _err_msg[:800],
+                            "error_type": _error_type,
+                        },
+                        progress=None,
+                    ))
+                    db.commit()
             except Exception:
                 logger.exception(
                     "[run_orchestration_pipeline] Could not persist failure row for run_id=%s",

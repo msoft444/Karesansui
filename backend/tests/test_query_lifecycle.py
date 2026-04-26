@@ -209,6 +209,12 @@ class TestErrorTypeClassification:
                 "unexpected error in OrchestratorManager.run()",
                 "inference",
             ),
+            # preflight connectivity-failure prefix (Phase 2 Step 2)
+            (
+                "[preflight] connectivity-failure: inference backend unreachable"
+                " — url=http://host.docker.internal:8000/v1, error=<urlopen error [Errno 101] Network is unreachable>",
+                "connectivity",
+            ),
         ],
     )
     def test_classification(self, err_msg: str, expected_type: str) -> None:
@@ -216,7 +222,11 @@ class TestErrorTypeClassification:
         # Mirror the exact classification logic from run_orchestration_pipeline's
         # outer except handler so any future change to that logic requires a
         # corresponding update here.
-        if "connectivity-failure" in err_msg or "Connection failed" in err_msg:
+        if (
+            "connectivity-failure" in err_msg
+            or "Connection failed" in err_msg
+            or "[preflight]" in err_msg
+        ):
             error_type = "connectivity"
         elif "schema-validation-failure" in err_msg:
             error_type = "validation"
@@ -280,19 +290,23 @@ class TestPipelineFailurePersistence:
 
         try:
             # Patch the async generate_structured function at the module level.
-            # Because run_orchestration_pipeline imports it lazily inside the
-            # function body, the lazy import picks up the patched object while
-            # the patch context is active.
-            with patch(
-                "app.llm.structured_output.generate_structured",
-                new=AsyncMock(side_effect=connectivity_error),
+            # Patch _check_inference_backend_reachable to a no-op so the test
+            # exercises the generate_structured connectivity path rather than
+            # the preflight path (which is covered by a dedicated test below).
+            with (
+                patch(
+                    "app.tasks._check_inference_backend_reachable",
+                    return_value=None,
+                ),
+                patch(
+                    "app.llm.structured_output.generate_structured",
+                    new=AsyncMock(side_effect=connectivity_error),
+                ),
             ):
-                # apply() executes the task synchronously in the current process,
-                # cycling through all retries immediately (countdown is ignored).
-                # With max_retries=2 (3 total attempts) and exc= provided to
-                # self.retry(), the original RuntimeError is raised on exhaustion
-                # rather than MaxRetriesExceededError, so the outer except handler
-                # in the task correctly classifies it as "connectivity".
+                # apply() executes the task synchronously in the current process.
+                # With the new Phase 2 Step 2 logic, connectivity failures are NOT
+                # retried (they raise directly); the task runs once and writes the
+                # terminal pipeline_failed_<run_id> row on the first attempt.
                 run_orchestration_pipeline.apply(
                     kwargs={
                         "user_query": "regression: connectivity failure persistence",
@@ -331,6 +345,102 @@ class TestPipelineFailurePersistence:
                 )
                 assert "connectivity-failure" in (r.result.get("error") or ""), (
                     "Expected the persisted error text to contain 'connectivity-failure'. "
+                    f"Actual: {r.result.get('error')!r}"
+                )
+            finally:
+                db.close()
+        finally:
+            _cleanup(run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test group 5: preflight failure path (Phase 2 Step 2)
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightFailurePersistence:
+    """_check_inference_backend_reachable failure writes a terminal row without retrying.
+
+    Phase 2 Step 2 adds a cheap GET /models probe before generate_structured()
+    so connectivity failures are classified deterministically on the first attempt
+    rather than disappearing into repeated opaque Celery retries.
+    """
+
+    def test_preflight_failure_creates_planner_failed_row_immediately(self) -> None:
+        """When the preflight probe fails, a single pipeline_failed row is written
+        with error_type=connectivity and the [preflight] prefix in the error text,
+        and the task does NOT retry (runs exactly once).
+        """
+        from app.database import SessionLocal
+        from app.models import History
+        from app.tasks import run_orchestration_pipeline
+
+        run_id = _make_run_id()
+
+        db = SessionLocal()
+        try:
+            db.add(
+                History(
+                    run_id=run_id,
+                    task_id=f"bootstrap_{run_id}",
+                    role="Planner",
+                    result={"status": "queued"},
+                    progress=None,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        preflight_error = RuntimeError(
+            "[preflight] connectivity-failure: inference backend unreachable"
+            f" — url=http://host.docker.internal:8000/v1,"
+            " error=<urlopen error [Errno 101] Network is unreachable>"
+        )
+
+        call_count = 0
+
+        def _failing_preflight(base_url: str, timeout: float = 5.0) -> None:
+            nonlocal call_count
+            call_count += 1
+            raise preflight_error
+
+        try:
+            with patch("app.tasks._check_inference_backend_reachable", side_effect=_failing_preflight):
+                run_orchestration_pipeline.apply(
+                    kwargs={
+                        "user_query": "regression: preflight failure",
+                        "run_id": run_id,
+                    },
+                    throw=False,
+                )
+
+            # Preflight must have been called exactly once — connectivity failures
+            # must not be retried.
+            assert call_count == 1, (
+                f"Expected preflight probe to be called exactly once (no retries); "
+                f"called {call_count} time(s)."
+            )
+
+            db = SessionLocal()
+            try:
+                rows = db.query(History).filter(History.run_id == run_id).all()
+                failure_rows = [
+                    r for r in rows if (r.task_id or "").startswith("pipeline_failed_")
+                ]
+                assert len(failure_rows) == 1, (
+                    f"Expected exactly one pipeline_failed row after preflight failure; "
+                    f"got {len(failure_rows)}: {[r.task_id for r in failure_rows]!r}"
+                )
+                r = failure_rows[0]
+                assert r.result["status"] == "planner-failed", (
+                    f"Expected status=planner-failed; got {r.result.get('status')!r}"
+                )
+                assert r.result.get("error_type") == "connectivity", (
+                    f"Expected error_type=connectivity; got {r.result.get('error_type')!r}"
+                )
+                assert "[preflight]" in (r.result.get("error") or ""), (
+                    "Expected persisted error text to contain '[preflight]'. "
                     f"Actual: {r.result.get('error')!r}"
                 )
             finally:
