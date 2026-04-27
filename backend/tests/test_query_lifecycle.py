@@ -1,4 +1,4 @@
-"""Regression tests for Phase 1 bug fix: exectask early-lifecycle visibility.
+"""Regression tests for Phase 1 & Phase 2 bug fix: exectask early-lifecycle visibility.
 
 These tests verify that:
 1. POST /query/ creates at least one durable History row (bootstrap) immediately,
@@ -8,12 +8,22 @@ These tests verify that:
 3. GET /stream/progress?run_id= emits an SSE ``data:`` event for the bootstrap row.
 4. The error_type classification logic in run_orchestration_pipeline correctly maps
    connectivity-failure / schema-validation-failure / other error strings.
-5. When planner inference fails with a connectivity error and all Celery retries are
-   exhausted, a terminal planner-failed row with error_type=connectivity is persisted.
+5. When planner inference fails with a connectivity error, a terminal planner-failed
+   row with error_type=connectivity is persisted (Phase 1 regression guard).
+6. The pipeline_failed_<run_id> duplicate guard prevents two terminal rows even when
+   the task is applied multiple times for the same run_id (Phase 2 Step 5).
+7. When the inference backend is reachable and Planner succeeds, no pipeline_failed
+   row is created — the success path is not regressed (Phase 2 Step 5).
+
+Integration tests (``@pytest.mark.integration``) additionally verify:
+- All three user-visible surfaces: execution history, Live Trace, and the
+  worker/diagnostics endpoint (GET /workers/diagnostics).
+- The recovery path: after restoring the inference backend, a new run proceeds
+  past the Planner stage without a connectivity failure row.
 
 Running these tests requires a reachable PostgreSQL instance configured via
-DATABASE_URL (see conftest.py).  Tests that need the full stack are marked
-``integration`` and are skipped by default.
+DATABASE_URL (see conftest.py).  Tests marked ``integration`` also need the
+full Docker Compose stack and are skipped by default.
 """
 from __future__ import annotations
 
@@ -319,11 +329,44 @@ class TestPipelineFailurePersistence:
             try:
                 rows = db.query(History).filter(History.run_id == run_id).all()
 
-                # At minimum: bootstrap row + pipeline_failed row.
-                # (planner_started row is also written before the first inference attempt.)
-                assert len(rows) >= 2, (
-                    f"Expected ≥2 History rows (bootstrap + pipeline_failed) after "
-                    f"connectivity failure; got {len(rows)}: {[r.task_id for r in rows]!r}"
+                # The full failure lifecycle must contain exactly three rows:
+                # bootstrap (queued), planner_started (planner-started), and
+                # pipeline_failed (planner-failed / connectivity).  Assert all
+                # three so that a regression dropping any single row is caught.
+                task_ids = [r.task_id for r in rows]
+                assert len(rows) >= 3, (
+                    f"Expected ≥3 History rows (bootstrap + planner_started + "
+                    f"pipeline_failed) after connectivity failure; "
+                    f"got {len(rows)}: {task_ids!r}"
+                )
+
+                bootstrap_rows = [
+                    r for r in rows if (r.task_id or "") == f"bootstrap_{run_id}"
+                ]
+                assert len(bootstrap_rows) == 1, (
+                    f"Expected exactly one bootstrap row with task_id=bootstrap_{run_id}; "
+                    f"got {len(bootstrap_rows)}: {[r.task_id for r in bootstrap_rows]!r}.  "
+                    "The failure-lifecycle regression guard must prove the run keeps its "
+                    "initial queued bootstrap record as well as the later planner_started "
+                    "and pipeline_failed rows."
+                )
+                assert bootstrap_rows[0].result.get("status") == "queued", (
+                    "bootstrap row must have status=queued; "
+                    f"got {bootstrap_rows[0].result.get('status')!r}"
+                )
+
+                planner_started_rows = [
+                    r for r in rows if (r.task_id or "").startswith("planner_started_")
+                ]
+                assert len(planner_started_rows) == 1, (
+                    f"Expected exactly one planner_started row; got {len(planner_started_rows)}: "
+                    f"{[r.task_id for r in planner_started_rows]!r}.  "
+                    "The planner_started row must be written before the preflight probe "
+                    "and Planner inference call (backend/app/tasks.py:_planner_started write)."
+                )
+                assert planner_started_rows[0].result.get("status") == "planner-started", (
+                    "planner_started row must have status=planner-started; "
+                    f"got {planner_started_rows[0].result.get('status')!r}"
                 )
 
                 failure_rows = [
@@ -442,6 +485,212 @@ class TestPreflightFailurePersistence:
                 assert "[preflight]" in (r.result.get("error") or ""), (
                     "Expected persisted error text to contain '[preflight]'. "
                     f"Actual: {r.result.get('error')!r}"
+                )
+            finally:
+                db.close()
+        finally:
+            _cleanup(run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test group 6: no-duplicate terminal rows (Phase 2 Step 5)
+# ---------------------------------------------------------------------------
+
+
+class TestNoDuplicateTerminalRows:
+    """The pipeline_failed_<run_id> duplicate guard must prevent two terminal rows
+    from being written even when the task is executed more than once for the same
+    run_id (as happens when Celery replays the task or when the worker process is
+    interrupted and restarted mid-retry).
+
+    The guard implemented in run_orchestration_pipeline is:
+        if not db.query(_History).filter(_History.task_id == _fail_task_id).first():
+            db.add(...)
+
+    This test applies the task twice synchronously to confirm exactly one
+    pipeline_failed_<run_id> row is present after both executions complete.
+    """
+
+    def test_repeated_task_execution_creates_single_failure_row(self) -> None:
+        """Applying run_orchestration_pipeline twice for the same run_id, each time
+        with a connectivity-failure mock, must result in exactly one
+        pipeline_failed_<run_id> row — the duplicate guard must prevent the second
+        execution from inserting a second terminal row.
+        """
+        from app.database import SessionLocal
+        from app.models import History
+        from app.tasks import run_orchestration_pipeline
+
+        run_id = _make_run_id()
+
+        db = SessionLocal()
+        try:
+            db.add(
+                History(
+                    run_id=run_id,
+                    task_id=f"bootstrap_{run_id}",
+                    role="Planner",
+                    result={"status": "queued"},
+                    progress=None,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        connectivity_error = RuntimeError(
+            "[structured_output] connectivity-failure: inference backend unreachable"
+            f" — url=http://host.docker.internal:8000/v1, model=karesansui"
+        )
+
+        try:
+            with (
+                patch(
+                    "app.tasks._check_inference_backend_reachable",
+                    return_value=None,
+                ),
+                patch(
+                    "app.llm.structured_output.generate_structured",
+                    new=AsyncMock(side_effect=connectivity_error),
+                ),
+            ):
+                # First execution — writes the terminal failure row.
+                run_orchestration_pipeline.apply(
+                    kwargs={
+                        "user_query": "regression: no-duplicate terminal row (attempt 1)",
+                        "run_id": run_id,
+                    },
+                    throw=False,
+                )
+                # Second execution — the duplicate guard must prevent a second row.
+                run_orchestration_pipeline.apply(
+                    kwargs={
+                        "user_query": "regression: no-duplicate terminal row (attempt 2)",
+                        "run_id": run_id,
+                    },
+                    throw=False,
+                )
+
+            db = SessionLocal()
+            try:
+                failure_rows = (
+                    db.query(History)
+                    .filter(
+                        History.run_id == run_id,
+                        History.task_id == f"pipeline_failed_{run_id}",
+                    )
+                    .all()
+                )
+                assert len(failure_rows) == 1, (
+                    f"Expected exactly one pipeline_failed_{run_id} row after two task "
+                    f"executions; got {len(failure_rows)}.  The duplicate guard in "
+                    "run_orchestration_pipeline must block the second INSERT."
+                )
+            finally:
+                db.close()
+        finally:
+            _cleanup(run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test group 7: success-path non-regression (Phase 2 Step 5)
+# ---------------------------------------------------------------------------
+
+
+class TestSuccessPathNonRegression:
+    """When the inference backend is reachable and Planner succeeds, no
+    pipeline_failed row must be created.
+
+    All external calls (preflight probe, structured-output LLM, DAG parser, and
+    OrchestratorManager) are mocked so the test is fully deterministic and does
+    not require a live inference backend or Redis broker.
+    """
+
+    def test_no_failure_row_when_planner_and_orchestration_succeed(self) -> None:
+        """With a successful Planner response and a passing readiness check,
+        run_orchestration_pipeline must complete without writing any
+        pipeline_failed row for the run.
+
+        This is the success-path regression guard: any change that accidentally
+        triggers the terminal-failure path for a healthy run will break this test.
+        """
+        from app.database import SessionLocal
+        from app.models import History
+        from app.schemas import DagPayload, StandardTaskNode
+        from app.tasks import run_orchestration_pipeline
+
+        run_id = _make_run_id()
+
+        db = SessionLocal()
+        try:
+            db.add(
+                History(
+                    run_id=run_id,
+                    task_id=f"bootstrap_{run_id}",
+                    role="Planner",
+                    result={"status": "queued"},
+                    progress=None,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        # Minimal valid DagPayload that DagParser will accept without error.
+        minimal_dag = DagPayload(
+            tasks=[
+                StandardTaskNode(
+                    task_id="synth",
+                    task_type="Standard",
+                    role="Report_Synthesizer",
+                    parent_ids=[],
+                    dynamic_params={},
+                )
+            ]
+        )
+
+        try:
+            with (
+                # Preflight probe passes without touching the network.
+                patch(
+                    "app.tasks._check_inference_backend_reachable",
+                    return_value=None,
+                ),
+                # Planner LLM returns a valid DAG on the first call.
+                patch(
+                    "app.llm.structured_output.generate_structured",
+                    new=AsyncMock(return_value=minimal_dag),
+                ),
+                # OrchestratorManager.run completes without error so the task
+                # returns normally and the outer except block is never entered.
+                patch(
+                    "app.orchestrator.manager.OrchestratorManager.run",
+                    return_value={},
+                ),
+            ):
+                run_orchestration_pipeline.apply(
+                    kwargs={
+                        "user_query": "regression: success path non-regression",
+                        "run_id": run_id,
+                    },
+                    throw=False,
+                )
+
+            db = SessionLocal()
+            try:
+                failure_rows = (
+                    db.query(History)
+                    .filter(
+                        History.run_id == run_id,
+                        History.task_id == f"pipeline_failed_{run_id}",
+                    )
+                    .all()
+                )
+                assert len(failure_rows) == 0, (
+                    f"Expected zero pipeline_failed rows when Planner and orchestration "
+                    f"succeed; found {len(failure_rows)}: "
+                    f"{[r.result for r in failure_rows]!r}.  "
+                    "The success path must not trigger the terminal-failure guard."
                 )
             finally:
                 db.close()
@@ -779,4 +1028,180 @@ def test_workers_page_renders() -> None:
     assert "ワーカー" in html, (
         "Workers page is missing UI label 'ワーカー'. "
         "Rebuild: cd frontend && npm run build && npm run start."
+    )
+
+
+@pytest.mark.integration
+def test_e2e_worker_diagnostics_endpoint() -> None:
+    """Worker diagnostics surface (GET /workers/diagnostics) returns the expected
+    shape with all required fields.
+
+    This test covers the third user-visible surface (worker/diagnostic visibility)
+    from the Phase 2 bugfix.  The endpoint must be reachable and return a JSON
+    object containing ``inference_backend_reachable``, ``inference_backend_url``,
+    ``error``, and ``checked_at`` regardless of whether the inference backend is
+    actually up or down.
+
+    Manual verification steps for the Planner connectivity failure scenario:
+
+    1. Reproduce failure:
+       a. Stop the inference API on the host (or point INFERENCE_API_BASE_URL at an
+          unreachable address in docker-compose.yml and restart the worker container).
+       b. Submit a new run via POST /query/ (or the frontend new-task form).
+       c. Surface 1 — Execution history: GET /history?run_id=<id> should eventually
+          show status=planner-failed with error_type=connectivity.
+       d. Surface 2 — Live Trace: the SSE stream at /stream/progress?run_id=<id>
+          (or the frontend /live page) should emit the bootstrap and failure events.
+       e. Surface 3 — Worker diagnostics: GET /workers/diagnostics should show
+          inference_backend_reachable=false.
+
+    2. Restore backend:
+       a. Start the inference API on the host (or restore INFERENCE_API_BASE_URL
+          and restart the worker container).
+       b. Verify recovery: GET /workers/diagnostics should now show
+          inference_backend_reachable=true.
+       c. Submit a new run. Poll GET /history?run_id=<new_id> until a
+          planner_run_<new_id> row appears — this confirms the Planner LLM call
+          succeeded, the DAG was persisted, and the task has genuinely proceeded
+          past the Planner stage without a connectivity failure.
+    """
+    import json
+    import urllib.request
+
+    backend_url = "http://localhost:8001"
+
+    try:
+        with urllib.request.urlopen(
+            f"{backend_url}/workers/diagnostics", timeout=10
+        ) as resp:
+            body = json.loads(resp.read())
+            status = resp.status
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Backend not reachable at {backend_url}: {exc}")
+
+    assert status == 200, (
+        f"GET /workers/diagnostics returned HTTP {status}; expected 200."
+    )
+    assert "inference_backend_reachable" in body, (
+        f"GET /workers/diagnostics response missing 'inference_backend_reachable' field: {body!r}"
+    )
+    assert isinstance(body["inference_backend_reachable"], bool), (
+        f"'inference_backend_reachable' must be a bool; got {type(body['inference_backend_reachable']).__name__!r}"
+    )
+    assert "inference_backend_url" in body, (
+        f"GET /workers/diagnostics response missing 'inference_backend_url' field: {body!r}"
+    )
+    assert "error" in body, (
+        f"GET /workers/diagnostics response missing 'error' field: {body!r}"
+    )
+    assert "checked_at" in body, (
+        f"GET /workers/diagnostics response missing 'checked_at' field: {body!r}"
+    )
+
+
+@pytest.mark.integration
+def test_e2e_recovery_path_no_connectivity_failure_row() -> None:
+    """Recovery path: when the inference backend is reachable, a submitted run must
+    advance past the Planner stage — a ``planner_run_<run_id>`` History row written
+    by ``OrchestratorManager._persist_planner_dag()`` must appear within 30 seconds.
+
+    This test mirrors Step 2 of the manual verification sequence:
+    - The inference backend is assumed to be reachable (skip if it is not).
+    - After acceptance, the history is polled for 30 seconds.
+    - A ``planner_run_<run_id>`` row appearing (no connectivity failure row) proves
+      that the Planner LLM call succeeded and OrchestratorManager.run() was entered
+      — i.e., the run has genuinely advanced past the Planner stage.
+    - ``planner_started`` alone is NOT sufficient proof: that row is written before
+      both the preflight probe and the Planner inference call, so it would appear
+      even when the run ultimately fails with error_type=connectivity.
+
+    Requires: Docker Compose stack running (db, redis, backend, worker) AND the
+    inference backend reachable at the INFERENCE_API_BASE_URL configured for the
+    worker container.  The test is automatically skipped if the backend returns a
+    connectivity failure, since that condition belongs to the failure-path test.
+    """
+    import json
+    import time
+    import urllib.request
+
+    backend_url = "http://localhost:8001"
+
+    # --- Pre-condition: check that the diagnostics endpoint reports reachable ---
+    try:
+        with urllib.request.urlopen(
+            f"{backend_url}/workers/diagnostics", timeout=10
+        ) as resp:
+            diag = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Backend not reachable at {backend_url}: {exc}")
+
+    if not diag.get("inference_backend_reachable"):
+        pytest.skip(
+            "Inference backend is unreachable per /workers/diagnostics "
+            f"(error={diag.get('error')!r}); skipping recovery-path test.  "
+            "Restore the inference API and re-run to validate the recovery path."
+        )
+
+    # --- Submit a run -------------------------------------------------------
+    data = json.dumps({"query": "e2e recovery path: no connectivity failure"}).encode()
+    req = urllib.request.Request(
+        f"{backend_url}/query/",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"POST /query/ failed: {exc}")
+
+    run_id: str = body["run_id"]
+    assert run_id, "POST /query/ must return a non-empty run_id"
+
+    # --- Poll history for 30 s: require planner_run_<run_id>, no connectivity failure ---
+    # planner_run_<run_id> is written by OrchestratorManager._persist_planner_dag() as the
+    # very first action after the Planner LLM call completes and the DAG is validated.
+    # Its presence proves the run advanced past the Planner stage — unlike planner_started,
+    # which is written before the preflight probe and Planner inference call.
+    planner_run_seen = False
+    connectivity_failure_seen = False
+    rows: list = []
+    deadline = time.monotonic() + 30.0
+
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        try:
+            with urllib.request.urlopen(
+                f"{backend_url}/history?run_id={run_id}", timeout=10
+            ) as resp:
+                rows = json.loads(resp.read())
+        except Exception:  # noqa: BLE001
+            continue
+
+        for row in rows:
+            task_id = row.get("task_id") or ""
+            result = row.get("result") or {}
+            if task_id == f"planner_run_{run_id}":
+                planner_run_seen = True
+            if (
+                result.get("status") == "planner-failed"
+                and result.get("error_type") == "connectivity"
+            ):
+                connectivity_failure_seen = True
+                break
+        if planner_run_seen or connectivity_failure_seen:
+            break
+
+    assert not connectivity_failure_seen, (
+        f"Recovery path: run_id={run_id!r} produced a planner-failed row with "
+        "error_type=connectivity even though /workers/diagnostics reported the "
+        "inference backend as reachable.  Check INFERENCE_API_BASE_URL configuration "
+        "in the worker container."
+    )
+    assert planner_run_seen, (
+        f"Recovery path: run_id={run_id!r} did not produce a planner_run_{run_id} row "
+        f"within 30 seconds.  Last history task_ids: {[r.get('task_id') for r in rows]!r}.  "
+        "planner_run_<run_id> is written by OrchestratorManager._persist_planner_dag() only "
+        "after the Planner LLM call succeeds; its absence means the run has not yet reached "
+        "the orchestration stage.  Check worker logs: docker compose logs worker."
     )

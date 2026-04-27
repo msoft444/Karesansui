@@ -469,8 +469,12 @@ def run_orchestration_pipeline(
 
         # --- Stage 1: Invoke the Planner LLM to produce a structured DAG ----
         # Use generate_structured() with DagPayload as the response model so
-        # the instructor library enforces the DAG JSON schema at the logits
-        # level, satisfying requirement_specification.md §9 (Error Handling).
+        # the instructor library enforces the DAG JSON schema, satisfying
+        # requirement_specification.md §9 (Error Handling).  json_mode=True is
+        # passed below because the configured local inference backend (mlx_lm)
+        # does not implement response_format.json_schema at the logits level;
+        # instructor falls back to Mode.JSON with application-layer Pydantic
+        # validation and automatic retries — the approved fallback per §9.
         planner_messages: list[dict[str, Any]] = [
             {"role": "system", "content": planner_prompt},
             {"role": "user", "content": user_query},
@@ -527,6 +531,8 @@ def run_orchestration_pipeline(
                     response_model=_DagPayload,
                     temperature=0.0,  # Deterministic planning
                     max_tokens=planner_max_tokens,
+                    max_retries=5,  # Extra retries for complex DAG schema
+                    json_mode=True,  # mlx_lm does not support json_schema at the logits level
                 )
             )
         except Exception as exc:
@@ -596,6 +602,12 @@ def run_orchestration_pipeline(
             db_session=db,
             temperature=temperature,
             max_tokens=max_tokens,
+            # Mirror the Planner's json_mode choice: the same inference backend
+            # (mlx_lm) serves all downstream tasks, so Mode.JSON with
+            # application-layer Pydantic validation is required here too.
+            # On backends that implement response_format.json_schema natively
+            # this should be set to False (the default) for logits-level enforcement.
+            json_mode=True,
         )
         task_results = manager.run(nodes, user_query, run_id=run_id)
         logger.info(

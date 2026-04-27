@@ -15,14 +15,16 @@ INFERENCE_API_KEY: str = os.environ.get("INFERENCE_API_KEY", "not-required")
 # Default timeout in seconds for a single structured inference request.
 _DEFAULT_TIMEOUT_SECONDS: float = 120.0
 
-# instructor.Mode.JSON_SCHEMA sends response_format={"type":"json_schema",
-# "json_schema":{"name":...,"schema":...,"strict":True}} so the server is
-# asked to constrain output to the exact Pydantic schema — satisfying the
-# "JSON Schema constraints at the Logits level" requirement
-# (requirement_specification.md §8, implementation_guide.md Phase 4 Step 2).
-# This mode avoids the tool_call protocol entirely, which is necessary because
-# mlx_lm can return multiple tool calls in a single response — a pattern that
-# instructor.Mode.TOOLS rejects with AssertionError.
+# Primary client: JSON_SCHEMA mode instructs the inference backend to apply
+# JSON Schema constraints at the logits level (requirement_specification.md §93).
+# Used for Standard/Debate structured tasks on backends that implement
+# response_format.json_schema (e.g., OpenAI, vLLM with --guided-json).
+#
+# JSON client: JSON mode sends response_format={"type":"json_object"} for
+# inference backends (e.g., mlx_lm) that do not implement json_schema at the
+# logits level.  instructor validates the Pydantic schema in Python and retries
+# on failure — providing schema enforcement at the application layer.
+# Pass json_mode=True to generate_structured() to use this client.
 _raw_client = openai.AsyncOpenAI(
     base_url=INFERENCE_API_BASE_URL,
     api_key=INFERENCE_API_KEY,
@@ -31,6 +33,10 @@ _raw_client = openai.AsyncOpenAI(
 _client: instructor.AsyncInstructor = instructor.from_openai(
     _raw_client,
     mode=instructor.Mode.JSON_SCHEMA,
+)
+_json_client: instructor.AsyncInstructor = instructor.from_openai(
+    _raw_client,
+    mode=instructor.Mode.JSON,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -45,6 +51,7 @@ async def generate_structured(
     max_tokens: int = 2048,
     max_retries: int = 3,
     timeout: float | None = None,
+    json_mode: bool = False,
 ) -> T:
     """Send a chat-completion request and enforce 100% JSON-schema-compliant output.
 
@@ -76,9 +83,10 @@ async def generate_structured(
             the verbose internal ``InstructorRetryException`` XML dump.
     """
     effective_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT_SECONDS
+    active_client = _json_client if json_mode else _client
 
     try:
-        result: T = await _client.chat.completions.create(
+        result: T = await active_client.chat.completions.create(
             model=model,
             messages=messages,
             response_model=response_model,
