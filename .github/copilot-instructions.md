@@ -26,7 +26,7 @@ When specific commands are entered in this "Karesansui" project, strictly execut
 
 ### `feature [dir] (phase [N]) step [M]` (Execute Feature)
 - **Role:** Senior Software Engineer
-- **Task:** Read the `features.md` under `docs/feature/[dir]/` as context. Then interpret the specified phase/step in `plan.md` of the same directory as a "complete prompt" and implement the feature.
+- **Task:** Read the `features.md` under `docs/features/[dir]/` as context. Then interpret the specified phase/step in `plan.md` of the same directory as a "complete prompt" and implement the feature.
 - **File Application Rule (STRICT):** Modify and apply files directly without waiting for user confirmation or approval.
 - **Prohibited:** Never simulate reviews (`sc`, `dc`) on your own. Stop and announce "Next, please execute `sc`".
 
