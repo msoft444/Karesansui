@@ -84,6 +84,57 @@ def list_tasks():
     return {"active": all_active, "reserved": all_reserved}
 
 
+@router.get("/diagnostics", response_model=Dict[str, Any])
+def get_diagnostics():
+    """Return runtime diagnostic state for the inference backend.
+
+    Probes INFERENCE_API_BASE_URL from inside the container so the result
+    reflects container-to-host reachability, not browser-to-host reachability.
+    A timeout on the probe is treated as potentially reachable (cold-start safe).
+    """
+    import os as _os
+    import socket as _socket
+    import urllib.error
+    import urllib.request
+
+    base_url: str = _os.environ.get(
+        "INFERENCE_API_BASE_URL", "http://host.docker.internal:8000/v1"
+    )
+    api_key: str = _os.environ.get("INFERENCE_API_KEY", "not-required")
+    probe_url = base_url.rstrip("/") + "/models"
+
+    reachable = False
+    error_detail: Optional[str] = None
+
+    try:
+        req = urllib.request.Request(
+            probe_url,
+            method="GET",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5.0):
+            pass
+        reachable = True
+    except urllib.error.HTTPError:
+        # An HTTP error response means the backend process is accepting connections.
+        reachable = True
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (_socket.timeout, TimeoutError)):
+            # Slow or cold-starting backend — treat as potentially reachable.
+            reachable = True
+        else:
+            error_detail = str(exc)
+    except OSError as exc:
+        error_detail = str(exc)
+
+    return {
+        "inference_backend_reachable": reachable,
+        "inference_backend_url": base_url,
+        "error": error_detail,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.post(
     "/tasks/{task_id}/revoke",
     status_code=status.HTTP_200_OK,

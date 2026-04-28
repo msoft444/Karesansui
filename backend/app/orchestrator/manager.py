@@ -29,14 +29,12 @@ import os
 import uuid
 from typing import Any
 
-from celery.result import AsyncResult
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import History
 from app.orchestrator.dag_parser import DagNode
 from app.orchestrator.debate_controller import DebateController
-from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +47,127 @@ _DEFAULT_TASK_TIMEOUT: float = float(
 )
 """Seconds to wait for a single task before raising TimeoutError."""
 
-_TASK_NAME = "app.tasks.run_structured_inference"
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+_INFERENCE_MAX_RETRIES: int = 3
+_INFERENCE_BASE_RETRY_COUNTDOWN: float = 2.0
+
+
+def _run_inference_direct(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    response_model_class_path: str,
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+    json_mode: bool = False,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Run structured inference in-process without dispatching a Celery subtask.
+
+    OrchestratorManager is called from inside ``run_orchestration_pipeline``,
+    which is itself a Celery task.  Celery forbids blocking on a dispatched
+    subtask result from within a task (raises RuntimeError: "Never call
+    result.get() within a task!").  This helper calls ``generate_structured``
+    directly, bypassing the broker entirely, while preserving the same
+    transient-error retry contract as ``app.tasks.run_structured_inference``
+    (up to ``_INFERENCE_MAX_RETRIES`` retries with exponential back-off for
+    connectivity and schema-validation failures).
+
+    Parameters
+    ----------
+    json_mode:
+        When ``True``, uses ``instructor.Mode.JSON`` (application-layer Pydantic
+        validation) instead of the default ``Mode.JSON_SCHEMA`` (logits-level
+        schema enforcement).  Pass ``True`` for inference backends that do not
+        implement ``response_format.json_schema`` at the logits level (e.g.
+        mlx_lm).  Defaults to ``False`` so that backends which support native
+        JSON Schema enforcement are not downgraded.
+
+    The returned dict matches the ``{"result": ..., "progress": ...}`` envelope
+    produced by the ``run_structured_inference`` Celery task.
+    """
+    import asyncio
+    import importlib
+    import time
+
+    # Deferred import to avoid circular imports at module load time.
+    from app.llm.structured_output import generate_structured
+
+    module_path, class_name = response_model_class_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    response_model = getattr(module, class_name)
+
+    last_exc: BaseException | None = None
+    for attempt in range(_INFERENCE_MAX_RETRIES + 1):
+        try:
+            result = asyncio.run(
+                generate_structured(
+                    model=model,
+                    messages=messages,
+                    response_model=response_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                    timeout=timeout,
+                )
+            )
+            return {
+                "result": result.model_dump(),
+                "progress": {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            }
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            if (
+                "connectivity-failure" in error_msg
+                or "Connection failed" in error_msg
+                or "timed out" in error_msg
+                or "schema-validation-failure" in error_msg
+            ):
+                last_exc = exc
+                if attempt < _INFERENCE_MAX_RETRIES:
+                    wait = _INFERENCE_BASE_RETRY_COUNTDOWN * (2 ** attempt)
+                    logger.warning(
+                        "[_run_inference_direct] Transient error (attempt %d/%d), "
+                        "retrying in %.1f s: %s",
+                        attempt + 1,
+                        _INFERENCE_MAX_RETRIES + 1,
+                        wait,
+                        error_msg,
+                    )
+                    time.sleep(wait)
+                    continue
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Defensive fallback for InstructorRetryException / ValidationError
+            # that bypasses generate_structured()'s normalisation layer.
+            exc_name = type(exc).__name__
+            if "InstructorRetryException" in exc_name or "ValidationError" in exc_name:
+                last_exc = exc
+                if attempt < _INFERENCE_MAX_RETRIES:
+                    wait = _INFERENCE_BASE_RETRY_COUNTDOWN * (2 ** attempt)
+                    logger.warning(
+                        "[_run_inference_direct] Structured-output validation failure "
+                        "(attempt %d/%d), retrying in %.1f s: %s",
+                        attempt + 1,
+                        _INFERENCE_MAX_RETRIES + 1,
+                        wait,
+                        exc_name,
+                    )
+                    time.sleep(wait)
+                    continue
+            raise
+    # All retries exhausted — re-raise the last transient exception.
+    raise last_exc  # type: ignore[misc]
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -95,6 +213,7 @@ class OrchestratorManager:
         db_session: Session | None = None,
         temperature: float = 0.0,
         max_tokens: int = 2048,
+        json_mode: bool = False,
     ) -> None:
         self._model = model
         self._response_model_class_path = response_model_class_path
@@ -104,6 +223,7 @@ class OrchestratorManager:
         self._db_session = db_session
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._json_mode = json_mode
 
         # task_id (str) → completed result dict extracted from the Celery backend.
         self._completed_results: dict[str, dict[str, Any]] = {}
@@ -160,6 +280,7 @@ class OrchestratorManager:
                     db_session=self._db_session,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
+                    json_mode=self._json_mode,
                     run_id=run_id,
                 )
                 final_result, debate_progress = controller.run(
@@ -303,24 +424,20 @@ class OrchestratorManager:
         memory).
         """
         logger.info(
-            "[manager] Enqueueing task_id=%r type=%r", node.task_id, node.task_type
+            "[manager] Running task_id=%r type=%r", node.task_id, node.task_type
         )
-        async_result: AsyncResult = celery_app.send_task(
-            _TASK_NAME,
-            kwargs={
-                "model": self._model,
-                "messages": messages,
-                "response_model_schema": self._response_model_schema,
-                "response_model_class_path": self._response_model_class_path,
-                "temperature": self._temperature,
-                "max_tokens": self._max_tokens,
-            },
-        )
-
-        # Block until the task finishes or the timeout elapses.
-        # tasks.py returns {"result": ..., "progress": ...} – unpack both fields.
-        task_output: dict[str, Any] = async_result.get(
-            timeout=self._task_timeout, propagate=True
+        # Call inference directly (in-process) rather than dispatching a
+        # Celery subtask.  OrchestratorManager runs inside the
+        # run_orchestration_pipeline Celery task; Celery forbids blocking on
+        # a dispatched subtask result from within a task with result.get().
+        task_output: dict[str, Any] = _run_inference_direct(
+            model=self._model,
+            messages=messages,
+            response_model_class_path=self._response_model_class_path,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            json_mode=self._json_mode,
+            timeout=self._task_timeout,
         )
         result_dict: dict[str, Any] = task_output["result"]
         progress_dict: dict[str, Any] = task_output.get("progress") or {}

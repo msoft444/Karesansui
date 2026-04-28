@@ -31,3 +31,33 @@
 - `docker-compose.yml` — `backend` と `worker` は既定で `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1` を使用する。
 - `frontend/src/app/page.tsx` — 現行ソースでは新規タスクフォームが表示され続けるが、production で配信されているページの内容とは一致していない。
 - `frontend/package.json` と `frontend/.next/BUILD_ID` — `next start` は既存の `.next` 出力を配信しており、現在の build は checkout 済みソースより古い。
+
+# バグ報告: exectask (2026-04-25 phase2)
+
+## 症状
+- 新しく送信したタスクが Planner 段階で停止し、`task_id=pipeline_failed_1e450844b616497da61ec72e0af9bf4c` として終了する。
+- `GET /history?task_id=pipeline_failed_1e450844b616497da61ec72e0af9bf4c` を参照すると、Planner の history 行に `status=planner-failed`、`error_type=connectivity`、`error="[structured_output] connectivity-failure: inference backend unreachable — url=http://host.docker.internal:8000/v1, model=karesansui"` が保存されている。
+- `GET /history?run_id=1e450844b616497da61ec72e0af9bf4c` で返る行は `bootstrap_...`、`planner_started_...`、`pipeline_failed_...` の 3 件だけであり、`planner_run_...` や下流タスクの行は作成されないため、run は Planner を越えて進行しない。
+
+## 再現手順
+1. `backend` と `worker` が既定の `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1` を使う構成のままスタックを起動する。
+2. その推論バックエンドを到達不能のままにする。今回の観測環境では、ホスト上の `http://localhost:8000/v1/models` は `ConnectionRefusedError: [Errno 61] Connection refused` で失敗し、`backend` コンテナ内からの `http://host.docker.internal:8000/v1/models` は `OSError: [Errno 101] Network is unreachable` で失敗した。
+3. UI もしくは `POST /query/` から新しいタスクを送信する。
+4. worker が Planner の retry を使い切った後に `GET /history?run_id=<run_id>` を確認する。
+5. run が `pipeline_failed_<run_id>` で終了し、その失敗行に `status=planner-failed` と `error_type=connectivity` が入っていることを確認する。
+
+## 期待される挙動
+- Planner は、新しく送信されたタスクに対して、設定済みの推論バックエンドへ到達して DAG を生成できるべきである。
+- 正常な run は `bootstrap_<run_id>` と `planner_started_<run_id>` の後に `planner_run_<run_id>` と下流タスクの行へ進み、Planner 段階で停止しないべきである。
+
+## 実際の挙動
+- `run_orchestration_pipeline` は `planner_started_<run_id>` を書いた後、Planner DAG 用の `generate_structured()` を呼び出す。
+- `generate_structured()` は、失敗した OpenAI/instructor リクエストを `"[structured_output] connectivity-failure: inference backend unreachable — url=http://host.docker.internal:8000/v1, model=karesansui"` に正規化する。
+- `run_orchestration_pipeline` の外側の例外ハンドラは、`role=Planner`、`status=planner-failed`、`error_type=connectivity` を持つ `pipeline_failed_<run_id>` を永続化する。
+- 失敗が DAG 生成完了前に起きるため、run は `OrchestratorManager.run()` に到達せず、`planner_run_<run_id>` の history 行も書かれず、下流 worker タスクも一切スケジュールされない。
+
+## 影響ファイル
+- `backend/app/tasks.py` — Planner の structured-output 呼び出しの前後で `planner_started_<run_id>` と終端の `pipeline_failed_<run_id>` を書き込む。
+- `backend/app/llm/structured_output.py` — OpenAI/instructor クライアントの接続失敗を、History に保存される `connectivity-failure` RuntimeError へ変換する。
+- `backend/app/llm/inference_client.py` — 非 structured inference 呼び出しでも同じ `INFERENCE_API_BASE_URL` 依存を共有する。
+- `docker-compose.yml` — `backend` と `worker` の両方へ `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1` を注入する。

@@ -46,9 +46,11 @@ async def generate_response(
         The assistant message content as a plain string.
 
     Raises:
-        openai.APIConnectionError: When the inference engine is unreachable.
-        openai.APITimeoutError: When the request exceeds the configured timeout.
-        openai.APIStatusError: When the inference engine returns an HTTP error status.
+        RuntimeError: For all failure modes.  The message prefix indicates the category:
+            ``[inference_client] connectivity-failure`` for network / timeout errors, or
+            ``[inference_client] API error`` for HTTP status errors.  This mirrors the
+            classification scheme used by ``structured_output.generate_structured`` so
+            history consumers can classify failures without inspecting the source module.
     """
     effective_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT_SECONDS
 
@@ -62,11 +64,13 @@ async def generate_response(
         )
     except openai.APIConnectionError as exc:
         raise RuntimeError(
-            f"[inference_client] Connection failed: url={INFERENCE_API_BASE_URL}, model={model}"
+            f"[inference_client] connectivity-failure: inference backend unreachable"
+            f" — url={INFERENCE_API_BASE_URL}, model={model}"
         ) from exc
     except openai.APITimeoutError as exc:
         raise RuntimeError(
-            f"[inference_client] Request timed out after {effective_timeout}s: url={INFERENCE_API_BASE_URL}, model={model}"
+            f"[inference_client] connectivity-failure: request timed out after {effective_timeout}s"
+            f" — url={INFERENCE_API_BASE_URL}, model={model}"
         ) from exc
     except openai.APIStatusError as exc:
         raise RuntimeError(

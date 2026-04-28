@@ -1,4 +1,4 @@
-# Bug Report: exectask (2026-04-25)
+# Bug Report: exectask (2026-04-25　phase1)
 
 ## Symptom
 - Submitting a new task from the execution history screen returns a `run_id`, but no entry ever appears in execution history and the Live Trace stream stays empty.
@@ -31,3 +31,33 @@
 - `docker-compose.yml` — `backend` and `worker` default to `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1`.
 - `frontend/src/app/page.tsx` — current source keeps the new-task form visible, which does not match the page currently served in production mode.
 - `frontend/package.json` and `frontend/.next/BUILD_ID` — `next start` serves the existing `.next` output, and the current build is older than the checked-out source.
+
+# Bug Report: exectask (2026-04-25 phase2)
+
+## Symptom
+- A newly submitted task terminates at the Planner stage with `task_id=pipeline_failed_1e450844b616497da61ec72e0af9bf4c`.
+- `GET /history?task_id=pipeline_failed_1e450844b616497da61ec72e0af9bf4c` returns a Planner row whose result is `status=planner-failed`, `error_type=connectivity`, and `error="[structured_output] connectivity-failure: inference backend unreachable — url=http://host.docker.internal:8000/v1, model=karesansui"`.
+- `GET /history?run_id=1e450844b616497da61ec72e0af9bf4c` returns only `bootstrap_...`, `planner_started_...`, and `pipeline_failed_...`; no `planner_run_...` row or downstream task rows are created, so the run never advances past Planner.
+
+## How to reproduce
+1. Start the stack with the default runtime configuration so that `backend` and `worker` use `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1`.
+2. Leave the configured inference backend unavailable. In the observed environment, `http://localhost:8000/v1/models` on the host failed with `ConnectionRefusedError: [Errno 61] Connection refused`, and `http://host.docker.internal:8000/v1/models` from the `backend` container failed with `OSError: [Errno 101] Network is unreachable`.
+3. Submit a new task from the UI or `POST /query/`.
+4. Query `GET /history?run_id=<run_id>` after the worker finishes retrying the Planner step.
+5. Observe that the run ends with `pipeline_failed_<run_id>` and that the failure row contains `status=planner-failed` and `error_type=connectivity`.
+
+## Expected behavior
+- The Planner should be able to reach the configured inference backend and produce a DAG for newly submitted tasks.
+- A successful run should advance from `bootstrap_<run_id>` and `planner_started_<run_id>` to `planner_run_<run_id>` and downstream task rows instead of terminating inside the Planner stage.
+
+## Actual behavior
+- `run_orchestration_pipeline` writes `planner_started_<run_id>` and then calls `generate_structured()` for the Planner DAG.
+- `generate_structured()` normalizes the failed OpenAI/instructor request into `"[structured_output] connectivity-failure: inference backend unreachable — url=http://host.docker.internal:8000/v1, model=karesansui"`.
+- The outer exception handler in `run_orchestration_pipeline` persists `pipeline_failed_<run_id>` with `role=Planner`, `status=planner-failed`, and `error_type=connectivity`.
+- Because the failure happens before DAG generation completes, the run never reaches `OrchestratorManager.run()`, no `planner_run_<run_id>` history row is written, and no downstream worker tasks are scheduled.
+
+## Affected files
+- `backend/app/tasks.py` — writes the `planner_started_<run_id>` and terminal `pipeline_failed_<run_id>` rows around the Planner structured-output call.
+- `backend/app/llm/structured_output.py` — converts connectivity failures from the OpenAI/instructor client into the `connectivity-failure` RuntimeError stored in History.
+- `backend/app/llm/inference_client.py` — shares the same `INFERENCE_API_BASE_URL` dependency for non-structured inference calls.
+- `docker-compose.yml` — injects `INFERENCE_API_BASE_URL=http://host.docker.internal:8000/v1` into both `backend` and `worker`.

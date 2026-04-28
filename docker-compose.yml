@@ -50,8 +50,16 @@ services:
       # The host inference server (e.g. mlx_lm or llama.cpp on port 8000) MUST be running
       # before orchestration tasks can succeed.  When unreachable, the worker persists a
       # planner-failed / orchestration-failed History record tagged with error_type=connectivity.
+      # Health-check path: GET ${INFERENCE_API_BASE_URL%/v1}/v1/models (e.g. http://host.docker.internal:8000/v1/models).
       # Override by setting INFERENCE_API_BASE_URL in the environment or a .env file.
       INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      # Model identifier sent to the inference server in each request.  Must match the model
+      # ID reported by the server at GET /v1/models (e.g. the --model argument passed to mlx_lm).
+      # Used as the default model when no 'model' row exists in GlobalSettings.  If a row is
+      # present (set via the Settings UI), the DB value takes precedence.
+      # The migration 20260427_remove_stale_model_placeholder removes any legacy 'karesansui'
+      # placeholder row so this default takes effect automatically on first container start.
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-prism-ml/Ternary-Bonsai-8B-mlx-2bit}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       GITHUB_REPO: ${GITHUB_REPO}
     volumes:
@@ -83,8 +91,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # Same inference server address as the backend service above.  The worker container
       # resolves host.docker.internal via the extra_hosts entry below.
+      # Health-check path: GET /v1/models (same as the backend service above).
       # Override by setting INFERENCE_API_BASE_URL in the environment or a .env file.
       INFERENCE_API_BASE_URL: ${INFERENCE_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      # Same model default as the backend service above.
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-prism-ml/Ternary-Bonsai-8B-mlx-2bit}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       GITHUB_REPO: ${GITHUB_REPO}
     volumes:
