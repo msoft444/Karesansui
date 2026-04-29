@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import History
-from app.schemas import HistoryCreate, HistoryResponse, HistoryUpdate
+from app.schemas import HistoryCreate, HistoryResponse, HistoryUpdate, RunDetail, RunSummary
+from app.services.history_runs import aggregate_run_detail, aggregate_runs
 
 router = APIRouter(prefix="/history", tags=["history"])
 
@@ -24,6 +25,32 @@ def list_history(
     if run_id:
         query = query.filter(History.run_id == run_id)
     return query.order_by(History.created_at.desc()).all()
+
+
+@router.get("/runs", response_model=List[RunSummary])
+def list_runs(db: Session = Depends(get_db)):
+    """Return one RunSummary per Query Run, ordered by created_at descending."""
+    records = db.query(History).order_by(History.created_at.asc()).all()
+    # aggregate_runs already returns summaries sorted newest-first by created_at.
+    return aggregate_runs(records)
+
+
+@router.get("/runs/{run_id}", response_model=RunDetail)
+def get_run(run_id: str, db: Session = Depends(get_db)):
+    """Return the full RunDetail for a single Query Run."""
+    records = (
+        db.query(History)
+        .filter(History.run_id == run_id)
+        .order_by(History.created_at.asc())
+        .all()
+    )
+    detail = aggregate_run_detail(run_id, records)
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run '{run_id}' not found",
+        )
+    return detail
 
 
 @router.get("/{history_id}", response_model=HistoryResponse)

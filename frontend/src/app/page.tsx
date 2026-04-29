@@ -4,15 +4,13 @@ import Link from "next/link";
 import { useState } from "react";
 import useSWR from "swr";
 
-// HistoryRecord mirrors the HistoryResponse schema from the backend
-interface HistoryRecord {
-  id: string;
-  run_id: string | null;
-  task_id: string;
-  role: string;
-  result: Record<string, unknown> | null;
-  progress: Record<string, unknown> | null;
+// RunSummary mirrors the RunSummary schema from the backend
+interface RunSummary {
+  run_id: string;
+  status: "queued" | "running" | "completed" | "failed";
   created_at: string;
+  final_result_preview: string | null;
+  task_count: number;
 }
 
 interface QueryResponse {
@@ -32,36 +30,33 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-function getLifecycleLabel(
+function getRunStatusBadge(
   status: string,
-): { label: string; className: string } | null {
+): { label: string; className: string } {
   const map: Record<string, { label: string; className: string }> = {
     queued: {
       label: "待機中",
       className: "border-yellow-700/60 bg-yellow-900/40 text-yellow-300",
     },
-    "planner-started": {
-      label: "プランナー起動中",
+    running: {
+      label: "実行中",
       className: "border-blue-700/60 bg-blue-900/40 text-blue-300",
     },
-    enqueue_failed: {
-      label: "キュー失敗",
-      className: "border-red-700/60 bg-red-900/40 text-red-300",
-    },
-    "planner-failed": {
-      label: "プランナー失敗",
-      className: "border-red-700/60 bg-red-900/40 text-red-300",
-    },
-    "orchestration-failed": {
-      label: "オーケストレーション失敗",
-      className: "border-red-700/60 bg-red-900/40 text-red-300",
+    completed: {
+      label: "完了",
+      className: "border-emerald-700/60 bg-emerald-900/40 text-emerald-300",
     },
     failed: {
       label: "失敗",
       className: "border-red-700/60 bg-red-900/40 text-red-300",
     },
   };
-  return map[status] ?? null;
+  return (
+    map[status] ?? {
+      label: status,
+      className: "border-gray-700/60 bg-gray-900/40 text-gray-400",
+    }
+  );
 }
 
 export default function DashboardPage() {
@@ -70,9 +65,9 @@ export default function DashboardPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null);
 
-  // Fetch from /api/history/ which is proxied by Next.js to the FastAPI backend
-  const { data, error, isLoading } = useSWR<HistoryRecord[]>(
-    "/api/history",
+  // Fetch run-summary list from the run-oriented endpoint
+  const { data, error, isLoading } = useSWR<RunSummary[]>(
+    "/api/history/runs",
     fetcher,
     { refreshInterval: 5000 }
   );
@@ -203,12 +198,20 @@ export default function DashboardPage() {
             <p className="mt-2 font-mono text-xs text-emerald-300 break-all">
               run_id: {submittedRunId}
             </p>
-            <Link
-              href={`/live?run_id=${submittedRunId}`}
-              className="mt-3 inline-flex items-center rounded-lg border border-emerald-400/50 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/10"
-            >
-              ライブトレースを開く
-            </Link>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link
+                href={`/history/${submittedRunId}`}
+                className="inline-flex items-center rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500"
+              >
+                実行結果を確認
+              </Link>
+              <Link
+                href={`/live?run_id=${submittedRunId}`}
+                className="inline-flex items-center rounded-lg border border-emerald-400/50 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/10"
+              >
+                ライブトレースを開く
+              </Link>
+            </div>
           </div>
         )}
       </section>
@@ -218,7 +221,7 @@ export default function DashboardPage() {
         <div className="mb-6">
           <h2 className="text-2xl font-bold text-gray-100">実行履歴</h2>
           <p className="mt-1 text-sm text-gray-500">
-            エージェントタスクの実行ログ（5秒ごとに自動更新）
+            クエリ実行の一覧（5秒ごとに自動更新）
           </p>
         </div>
 
@@ -237,129 +240,67 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* History table */}
+        {/* Run list */}
         {data && (
-          <div className="overflow-x-auto rounded-xl border border-gray-800">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-gray-800 bg-gray-900">
-                <tr>
-                  {["Task ID", "ロール", "結果（抜粋）", "作成日時"].map((heading) => (
-                    <th
-                      key={heading}
-                      className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500"
-                    >
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800/60">
-                {data.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={4}
-                      className="px-4 py-12 text-center text-sm text-gray-600"
-                    >
-                      履歴データがありません。
-                    </td>
-                  </tr>
-                ) : (
-                  data.map((record) => (
-                    <tr
-                      key={record.id}
-                      className="bg-gray-950 transition-colors hover:bg-gray-900"
-                    >
-                      {/* Task ID */}
-                      <td className="max-w-[180px] px-4 py-3">
-                        <span
-                          className="block truncate font-mono text-xs text-indigo-300"
-                          title={record.task_id}
-                        >
-                          {record.task_id}
-                        </span>
-                      </td>
-
-                      {/* Role badge */}
-                      <td className="whitespace-nowrap px-4 py-3">
-                        <span className="inline-flex items-center rounded-full border border-indigo-700/60 bg-indigo-900/50 px-2.5 py-0.5 text-xs font-medium text-indigo-300">
-                          {record.role}
-                        </span>
-                      </td>
-
-                      {/* Result preview */}
-                      <td className="max-w-[340px] px-4 py-3">
-                        {(() => {
-                          if (!record.result) {
-                            return (
-                              <span className="font-mono text-xs text-gray-700">
-                                —
-                              </span>
-                            );
-                          }
-                          const statusStr =
-                            typeof (record.result as { status?: unknown }).status ===
-                            "string"
-                              ? (record.result as { status: string }).status
-                              : null;
-                          const lifecycle = statusStr
-                            ? getLifecycleLabel(statusStr)
-                            : null;
-                          if (lifecycle) {
-                            const res = record.result as {
-                              error_type?: string;
-                              error?: string;
-                            };
-                            const isConnectivity = res.error_type === "connectivity";
-                            const errMsg = res.error;
-                            return (
-                              <div className="flex flex-col gap-1">
-                                <span
-                                  className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium w-fit ${lifecycle.className}`}
-                                >
-                                  {lifecycle.label}
-                                </span>
-                                {isConnectivity && (
-                                  <span className="text-xs text-amber-400">
-                                    推論バックエンドに接続できません — ワーカー管理画面で状態を確認してください
-                                  </span>
-                                )}
-                                {errMsg && !isConnectivity && (
-                                  <span
-                                    className="block truncate font-mono text-xs text-red-400/70"
-                                    title={errMsg}
-                                  >
-                                    {errMsg.slice(0, 100)}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          }
-                          return (
-                            <span
-                              className="block truncate font-mono text-xs text-gray-500"
-                              title={JSON.stringify(record.result)}
-                            >
-                              {JSON.stringify(record.result).slice(0, 120)}
-                            </span>
-                          );
-                        })()}
-                      </td>
-
-                      {/* Timestamp */}
-                      <td className="whitespace-nowrap px-4 py-3 text-xs text-gray-600">
-                        {new Date(record.created_at).toLocaleString("ja-JP")}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+          <div className="space-y-3">
+            {data.length === 0 ? (
+              <div className="rounded-xl border border-gray-800 px-4 py-12 text-center text-sm text-gray-600">
+                実行履歴はありません。
+              </div>
+            ) : (
+              data.map((run) => {
+                const badge = getRunStatusBadge(run.status);
+                return (
+                  <Link
+                    key={run.run_id}
+                    href={`/history/${run.run_id}`}
+                    className="block rounded-xl border border-gray-800 bg-gray-950 px-5 py-4 transition-colors hover:border-indigo-700/60 hover:bg-gray-900"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${badge.className}`}
+                          >
+                            {badge.label}
+                          </span>
+                          <span className="font-mono text-xs text-indigo-300 truncate max-w-[260px]" title={run.run_id}>
+                            {run.run_id}
+                          </span>
+                        </div>
+                        {run.final_result_preview ? (
+                          <p className="mt-2 line-clamp-2 text-sm text-gray-300">
+                            {run.final_result_preview}
+                          </p>
+                        ) : (
+                          <p className="mt-2 text-xs text-gray-600 italic">
+                            {run.status === "queued"
+                              ? "実行待機中です"
+                              : run.status === "running"
+                              ? "実行中です"
+                              : "結果なし"}
+                          </p>
+                        )}
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="text-xs text-gray-500">
+                          {new Date(run.created_at).toLocaleString("ja-JP")}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-700">
+                          {run.task_count} タスク
+                        </p>
+                      </div>
+                    </div>
+                  </Link>
+                );
+              })
+            )}
           </div>
         )}
 
         {/* Record count */}
         {data && data.length > 0 && (
-          <p className="mt-3 text-xs text-gray-700">{data.length} 件のレコード</p>
+          <p className="mt-3 text-xs text-gray-700">{data.length} 件の実行</p>
         )}
       </section>
     </div>

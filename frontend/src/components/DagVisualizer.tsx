@@ -114,7 +114,7 @@ function TaskNode({ data }: NodeProps<TaskNodeData>) {
             }
           `}
         >
-          {data.task_type === "Debate" ? "Debate" : "Standard"}
+          {data.task_type === "Debate" ? "ディベート" : "標準"}
         </span>
       </div>
 

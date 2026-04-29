@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
@@ -300,3 +301,78 @@ class QueryResponse(BaseModel):
     """Response returned immediately after enqueuing a new orchestration run."""
 
     run_id: str
+
+
+# ---------------------------------------------------------------------------
+# Run-oriented read-model schemas (used by GET /history/runs endpoints)
+# ---------------------------------------------------------------------------
+
+
+class RunStatus(str, enum.Enum):
+    """Lifecycle status for a complete Query Run (across all its tasks)."""
+
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class TaskStatus(str, enum.Enum):
+    """Execution status for a single Display Task within a Query Run."""
+
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class DisplayTask(BaseModel):
+    """A user-visible task item derived from the Planner DAG topology.
+
+    One Display Task corresponds to one Planner ``task_id``.  Internal rows
+    (Debate rounds, raw sub-steps) are aggregated into ``sub_records`` rather
+    than being promoted to top-level tasks.
+    """
+
+    task_id: str
+    task_type: Literal["Standard", "Debate"]
+    role: str | None
+    participants: list[str] | None = None
+    mediator: str | None = None
+    parent_ids: list[str] = []
+    dynamic_params: dict[str, Any] = {}
+    status: TaskStatus
+    created_at: datetime | None = None
+    result: dict[str, Any] | None
+    progress: dict[str, Any] | None = None
+    sub_records: list["HistoryResponse"] = []
+
+
+class RunSummary(BaseModel):
+    """Lightweight per-run summary for the execution history list.
+
+    Returned by ``GET /history/runs``.  One item per ``run_id``.
+    """
+
+    run_id: str
+    status: RunStatus
+    created_at: datetime
+    final_result_preview: str | None = None
+    task_count: int
+
+
+class RunDetail(BaseModel):
+    """Full detail payload for a single Query Run.
+
+    Returned by ``GET /history/runs/{run_id}``.  Contains the final result,
+    ordered Display Task list, and raw DAG topology so the frontend can render
+    all three sections (final result, task drill-down, DAG) from one response.
+    """
+
+    run_id: str
+    status: RunStatus
+    created_at: datetime
+    final_result: dict[str, Any] | None = None
+    final_result_preview: str | None = None
+    dag_topology: list[dict[str, Any]] | None = None
+    tasks: list[DisplayTask] = []
