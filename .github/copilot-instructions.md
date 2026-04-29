@@ -38,8 +38,8 @@ When specific commands are entered in this "Karesansui" project, strictly execut
 
 ### `sc` (Static Review)
 - **Role:** Extremely Strict QA Engineer
-- **Task:** Statically verify syntax, design patterns, and security rules. **[Bugfix Context]: If the previous command was `fix` or its `rr`, verify that the logic statically satisfies the `expected behavior` defined in `bugs.md`.** Output the results to `review.md`.
-- **File Protection Rule (STRICT):** Except for writing to `review.md`, NEVER modify or add any existing source code or files. Propose fixes only as text.
+- **Task:** Statically verify syntax, design patterns, and security rules. **[Bugfix Context]: If the previous command was `fix` or its `rr`, verify that the logic statically satisfies the `expected behavior` defined in `bugs.md`.** Since `sc` now runs in Plan mode, do not write to `review.md`; instead, output the exact review content in the chat as copyable Markdown that is ready to be pasted into `review.md`.
+- **File Protection Rule (STRICT):** NEVER modify or add any existing source code or files, including `review.md`. Propose fixes only as text, and present the review result in chat as Markdown.
 
 ### `dc` (Dynamic Review)
 - **Role:** Extremely Strict QA Engineer
