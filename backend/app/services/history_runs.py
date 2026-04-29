@@ -344,6 +344,7 @@ def _build_display_tasks(
                     parent_ids=t.get("parent_ids", []),
                     dynamic_params=t.get("dynamic_params") or {},
                     status=task_status,
+                    created_at=latest.created_at if latest else None,
                     result=latest.result if latest else None,
                     progress=latest.progress if latest else None,
                     sub_records=[
@@ -387,6 +388,7 @@ def _build_display_tasks(
                     parent_ids=[],
                     dynamic_params={},
                     status=task_status,
+                    created_at=latest.created_at if latest else None,
                     result=latest.result if latest else None,
                     progress=latest.progress if latest else None,
                     sub_records=[

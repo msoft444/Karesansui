@@ -342,6 +342,7 @@ class DisplayTask(BaseModel):
     parent_ids: list[str] = []
     dynamic_params: dict[str, Any] = {}
     status: TaskStatus
+    created_at: datetime | None = None
     result: dict[str, Any] | None
     progress: dict[str, Any] | None = None
     sub_records: list["HistoryResponse"] = []
