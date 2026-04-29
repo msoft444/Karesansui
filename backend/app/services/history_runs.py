@@ -139,13 +139,17 @@ def _derive_run_status(
                 return RunStatus.failed
 
     # No task rows yet: derive from lifecycle rows.
+    # Check running first so a planner_started row wins over an earlier bootstrap
+    # (queued) row regardless of iteration order.
     if not task_records:
+        for r in lifecycle_rows:
+            st = _result_lifecycle_status(r.result)
+            if st in _RUNNING_STATUSES:
+                return RunStatus.running
         for r in lifecycle_rows:
             st = _result_lifecycle_status(r.result)
             if st in _QUEUED_STATUSES:
                 return RunStatus.queued
-            if st in _RUNNING_STATUSES:
-                return RunStatus.running
         return RunStatus.queued
 
     # All DAG tasks completed when every topology task has at least one primary
