@@ -194,7 +194,6 @@ class DebateController:
         self,
         *,
         model: str,
-        system_prompt_template: str = "You are a {role} agent.",
         task_timeout: float = _DEFAULT_TASK_TIMEOUT,
         db_session: Session | None = None,
         temperature: float = 0.0,
@@ -203,7 +202,6 @@ class DebateController:
         run_id: str | None = None,
     ) -> None:
         self._model = model
-        self._system_prompt_template = system_prompt_template
         self._task_timeout = task_timeout
         self._db_session = db_session
         self._temperature = temperature
@@ -251,6 +249,10 @@ class DebateController:
         final_result: dict[str, Any] = {}
         exited_naturally = False
         current_round = 1
+        # Collect full template provenance once per unique role so the debate
+        # summary row shows which template AND which parameter set were used
+        # for each participant/mediator — satisfying the per-task history req.
+        templates_used: dict[str, dict[str, Any]] = {}  # role_name -> {template_name, resolved_params, tools}
 
         for round_num in range(1, max_rounds + 1):
             current_round = round_num
@@ -271,6 +273,15 @@ class DebateController:
                     user_query=user_query,
                     round_num=round_num,
                 )
+                # Capture full template metadata on first encounter for the summary row.
+                if participant_role not in templates_used:
+                    tmpl_name = participant_progress.get("template_name")
+                    if tmpl_name:
+                        templates_used[participant_role] = {
+                            "template_name": tmpl_name,
+                            "resolved_params": participant_progress.get("resolved_params"),
+                            "tools": participant_progress.get("tools"),
+                        }
                 debate_history.append(
                     {"role": participant_role, "round": round_num, **participant_result}
                 )
@@ -295,6 +306,16 @@ class DebateController:
                 round_num=round_num,
                 forced=forced,
             )
+            # Capture mediator full template metadata on first encounter.
+            mediator_role_name = node.mediator or "Mediator"
+            if mediator_role_name not in templates_used:
+                med_tmpl = mediator_progress.get("template_name")
+                if med_tmpl:
+                    templates_used[mediator_role_name] = {
+                        "template_name": med_tmpl,
+                        "resolved_params": mediator_progress.get("resolved_params"),
+                        "tools": mediator_progress.get("tools"),
+                    }
             debate_history.append(
                 {"role": node.mediator, "round": round_num, **mediator_result}
             )
@@ -329,6 +350,9 @@ class DebateController:
             "debate_history": debate_history,
             "total_rounds": current_round,
             "forced_exit": not exited_naturally,
+            # Template provenance for the debate summary row — shows which
+            # RoleTemplate record was resolved for each participant/mediator role.
+            "templates_used": templates_used,
         }
 
         logger.info(
@@ -379,20 +403,44 @@ class DebateController:
         debate_history: list[dict[str, Any]],
         user_query: str,
         round_num: int,
-    ) -> list[dict[str, str]]:
-        """Build the OpenAI-format message list for a participant agent.
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        """Resolve RoleTemplate from DB and build the OpenAI-format message list
+        for a participant agent.
 
         Context injection order
         -----------------------
-        1. System prompt with role + dynamic params + round context.
+        1. System prompt resolved from RoleTemplate + merged params + round context.
         2. Original user query.
         3. Pre-debate parent task results (token-efficient, result-only).
         4. Accumulated debate transcript (all previous turns, current round included).
+
+        Returns
+        -------
+        tuple[list[dict], dict]
+            ``(messages, template_metadata)`` for persistence in History progress.
+
+        Raises
+        ------
+        TemplateNotFoundError
+            When the participant role has no matching RoleTemplate in the DB.
         """
-        system_content = self._system_prompt_template.format(role=participant_role)
-        if node.dynamic_params:
+        from app.services.role_templates import resolve_role_template
+
+        close_session = False
+        session: Session = self._db_session  # type: ignore[assignment]
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            resolved = resolve_role_template(participant_role, node.dynamic_params, session)
+        finally:
+            if close_session:
+                session.close()
+
+        system_content = resolved.system_prompt
+        if resolved.resolved_params:
             params_str = "; ".join(
-                f"{k}={v!r}" for k, v in node.dynamic_params.items()
+                f"{k}={v!r}" for k, v in resolved.resolved_params.items()
             )
             system_content += f"\nParameters: {params_str}"
         system_content += (
@@ -441,7 +489,12 @@ class DebateController:
             }
         )
 
-        return messages
+        template_metadata: dict[str, Any] = {
+            "template_name": resolved.template_name,
+            "resolved_params": resolved.resolved_params,
+            "tools": resolved.tools,
+        }
+        return messages, template_metadata
 
     def _build_mediator_messages(
         self,
@@ -451,19 +504,44 @@ class DebateController:
         user_query: str,
         round_num: int,
         forced: bool,
-    ) -> list[dict[str, str]]:
-        """Build the OpenAI-format message list for the Mediator agent.
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        """Resolve RoleTemplate from DB and build the OpenAI-format message list
+        for the Mediator agent.
 
         When *forced* is True, an explicit directive is appended to the system
         prompt instructing the Mediator to produce a conclusive summary and set
         ``consensus_reached=true`` regardless of whether natural agreement was
         reached.
+
+        Returns
+        -------
+        tuple[list[dict], dict]
+            ``(messages, template_metadata)`` for persistence in History progress.
+
+        Raises
+        ------
+        TemplateNotFoundError
+            When the mediator role has no matching RoleTemplate in the DB.
         """
+        from app.services.role_templates import resolve_role_template
+
         mediator_role = node.mediator or "Mediator"
-        system_content = self._system_prompt_template.format(role=mediator_role)
-        if node.dynamic_params:
+
+        close_session = False
+        session: Session = self._db_session  # type: ignore[assignment]
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            resolved = resolve_role_template(mediator_role, node.dynamic_params, session)
+        finally:
+            if close_session:
+                session.close()
+
+        system_content = resolved.system_prompt
+        if resolved.resolved_params:
             params_str = "; ".join(
-                f"{k}={v!r}" for k, v in node.dynamic_params.items()
+                f"{k}={v!r}" for k, v in resolved.resolved_params.items()
             )
             system_content += f"\nParameters: {params_str}"
 
@@ -524,7 +602,12 @@ class DebateController:
             }
         )
 
-        return messages
+        template_metadata: dict[str, Any] = {
+            "template_name": resolved.template_name,
+            "resolved_params": resolved.resolved_params,
+            "tools": resolved.tools,
+        }
+        return messages, template_metadata
 
     def _run_participant(
         self,
@@ -543,7 +626,7 @@ class DebateController:
         tuple[dict, dict]
             ``(result_dict, progress_dict)`` – both fields from the worker envelope.
         """
-        messages = self._build_participant_messages(
+        messages, tmpl_meta = self._build_participant_messages(
             node=node,
             participant_role=participant_role,
             parent_results=parent_results,
@@ -562,7 +645,11 @@ class DebateController:
             json_mode=self._json_mode,
             timeout=self._task_timeout,
         )
-        return task_output["result"], task_output.get("progress") or {}
+        progress = task_output.get("progress") or {}
+        progress["template_name"] = tmpl_meta.get("template_name")
+        progress["resolved_params"] = tmpl_meta.get("resolved_params")
+        progress["tools"] = tmpl_meta.get("tools")
+        return task_output["result"], progress
 
     def _run_mediator(
         self,
@@ -581,7 +668,7 @@ class DebateController:
         tuple[dict, dict]
             ``(result_dict, progress_dict)`` – both fields from the worker envelope.
         """
-        messages = self._build_mediator_messages(
+        messages, tmpl_meta = self._build_mediator_messages(
             node=node,
             parent_results=parent_results,
             debate_history=debate_history,
@@ -600,7 +687,11 @@ class DebateController:
             json_mode=self._json_mode,
             timeout=self._task_timeout,
         )
-        return task_output["result"], task_output.get("progress") or {}
+        progress = task_output.get("progress") or {}
+        progress["template_name"] = tmpl_meta.get("template_name")
+        progress["resolved_params"] = tmpl_meta.get("resolved_params")
+        progress["tools"] = tmpl_meta.get("tools")
+        return task_output["result"], progress
 
     def _persist_turn(
         self,

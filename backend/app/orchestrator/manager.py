@@ -186,10 +186,6 @@ class OrchestratorManager:
         structured output (e.g. ``"app.schemas.SomeModel"``).
     response_model_schema:
         JSON Schema dict produced by ``Model.model_json_schema()``.
-    system_prompt_template:
-        A format string used to build each task's system prompt.  The
-        ``{role}`` placeholder is substituted with the node's role template
-        name.
     task_timeout:
         Per-task wait timeout in seconds.  Defaults to the
         ``ORCHESTRATOR_TASK_TIMEOUT`` environment variable (300 s).
@@ -208,7 +204,6 @@ class OrchestratorManager:
         model: str,
         response_model_class_path: str,
         response_model_schema: dict[str, Any],
-        system_prompt_template: str = "You are a {role} agent.",
         task_timeout: float = _DEFAULT_TASK_TIMEOUT,
         db_session: Session | None = None,
         temperature: float = 0.0,
@@ -218,7 +213,6 @@ class OrchestratorManager:
         self._model = model
         self._response_model_class_path = response_model_class_path
         self._response_model_schema = response_model_schema
-        self._system_prompt_template = system_prompt_template
         self._task_timeout = task_timeout
         self._db_session = db_session
         self._temperature = temperature
@@ -269,13 +263,14 @@ class OrchestratorManager:
         # reconstruct and visualise the full graph for this run.
         self._persist_planner_dag(nodes, run_id=run_id)
 
+        from app.services.role_templates import TemplateNotFoundError
+
         for node in nodes:
             if node.task_type == "Debate":
                 # Delegate to DebateController for round-robin multi-agent debate.
                 parent_results = self._collect_parent_results(node.parent_ids)
                 controller = DebateController(
                     model=self._model,
-                    system_prompt_template=self._system_prompt_template,
                     task_timeout=self._task_timeout,
                     db_session=self._db_session,
                     temperature=self._temperature,
@@ -283,9 +278,23 @@ class OrchestratorManager:
                     json_mode=self._json_mode,
                     run_id=run_id,
                 )
-                final_result, debate_progress = controller.run(
-                    node, parent_results, user_query
-                )
+                try:
+                    final_result, debate_progress = controller.run(
+                        node, parent_results, user_query
+                    )
+                except TemplateNotFoundError as exc:
+                    logger.error(
+                        "[manager] RoleTemplate not found for debate task_id=%r: %s",
+                        node.task_id,
+                        exc,
+                    )
+                    self._persist(
+                        node,
+                        {"error": str(exc), "error_type": "template_not_found"},
+                        {"template_lookup_failed": True},
+                        run_id=run_id,
+                    )
+                    raise
                 # Cache the mediator's final conclusion for child tasks.
                 self._completed_results[node.task_id] = final_result
                 # Persist the debate summary row via the standard _persist path.
@@ -296,8 +305,25 @@ class OrchestratorManager:
                     history_id,
                 )
             else:
-                messages = self._build_messages(node, user_query)
-                history_id = self._enqueue_and_wait(node, messages, run_id=run_id)
+                try:
+                    messages, tmpl_meta = self._build_messages(node, user_query)
+                except TemplateNotFoundError as exc:
+                    logger.error(
+                        "[manager] RoleTemplate not found for task_id=%r role=%r: %s",
+                        node.task_id,
+                        node.role,
+                        exc,
+                    )
+                    self._persist(
+                        node,
+                        {"error": str(exc), "error_type": "template_not_found"},
+                        {"template_lookup_failed": True, "role_name": node.role},
+                        run_id=run_id,
+                    )
+                    raise
+                history_id = self._enqueue_and_wait(
+                    node, messages, run_id=run_id, template_meta=tmpl_meta
+                )
                 logger.info(
                     "[manager] task_id=%r completed; history_id=%r",
                     node.task_id,
@@ -357,22 +383,42 @@ class OrchestratorManager:
 
     def _build_messages(
         self, node: DagNode, user_query: str
-    ) -> list[dict[str, Any]]:
-        """Construct the OpenAI-format message list for *node*.
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Resolve RoleTemplate from DB and construct the OpenAI-format message list.
 
-        For root nodes (no parents) the first human turn is the raw
-        *user_query*.  For all other nodes, parent ``result`` dicts are
-        serialised as a single assistant message so the child agent has
-        exactly the structured conclusions it needs – with no ``progress``
-        noise.
+        Returns
+        -------
+        tuple[list[dict], dict]
+            ``(messages, template_metadata)`` where ``template_metadata``
+            contains ``template_name``, ``resolved_params``, and ``tools``
+            for persistence in the History progress column.
+
+        Raises
+        ------
+        TemplateNotFoundError
+            When the node's role has no matching RoleTemplate record in the DB.
         """
-        role_name = node.role if node.task_type == "Standard" else "Debate_Coordinator"
-        system_content = self._system_prompt_template.format(role=role_name)
+        from app.services.role_templates import resolve_role_template
 
-        # Inject dynamic params into the system prompt when present.
-        if node.dynamic_params:
+        role_name = node.role if node.task_type == "Standard" else "Debate_Coordinator"
+
+        close_session = False
+        session: Session = self._db_session  # type: ignore[assignment]
+        if session is None:
+            session = SessionLocal()
+            close_session = True
+        try:
+            resolved = resolve_role_template(role_name, node.dynamic_params, session)
+        finally:
+            if close_session:
+                session.close()
+
+        system_content = resolved.system_prompt
+
+        # Inject merged (template default + Planner override) params when present.
+        if resolved.resolved_params:
             params_str = "; ".join(
-                f"{k}={v!r}" for k, v in node.dynamic_params.items()
+                f"{k}={v!r}" for k, v in resolved.resolved_params.items()
             )
             system_content += f"\nParameters: {params_str}"
 
@@ -399,7 +445,12 @@ class OrchestratorManager:
                 }
             )
 
-        return messages
+        template_metadata: dict[str, Any] = {
+            "template_name": resolved.template_name,
+            "resolved_params": resolved.resolved_params,
+            "tools": resolved.tools,
+        }
+        return messages, template_metadata
 
     def _collect_parent_results(
         self, parent_ids: list[str]
@@ -414,7 +465,12 @@ class OrchestratorManager:
         }
 
     def _enqueue_and_wait(
-        self, node: DagNode, messages: list[dict[str, Any]], *, run_id: str
+        self,
+        node: DagNode,
+        messages: list[dict[str, Any]],
+        *,
+        run_id: str,
+        template_meta: dict[str, Any] | None = None,
     ) -> str | None:
         """Submit *node* to the Celery broker, block until complete, then
         persist the result to the History table.
@@ -441,6 +497,12 @@ class OrchestratorManager:
         )
         result_dict: dict[str, Any] = task_output["result"]
         progress_dict: dict[str, Any] = task_output.get("progress") or {}
+
+        # Enrich progress with resolved template metadata for history inspection.
+        if template_meta:
+            progress_dict["template_name"] = template_meta.get("template_name")
+            progress_dict["resolved_params"] = template_meta.get("resolved_params")
+            progress_dict["tools"] = template_meta.get("tools")
 
         # Cache only the result so children receive compact structured context.
         self._completed_results[node.task_id] = result_dict
