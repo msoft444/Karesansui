@@ -55,6 +55,14 @@ _DEFAULT_TASK_TIMEOUT: float = float(
 _INFERENCE_MAX_RETRIES: int = 3
 _INFERENCE_BASE_RETRY_COUNTDOWN: float = 2.0
 
+# Cap for the per-inference-call timeout forwarded to generate_structured().
+# This bounds a single LLM HTTP request independently of the overall
+# ORCHESTRATOR_TASK_TIMEOUT so that a stalled call does not hold the task
+# for the full task-level budget (300 s by default).
+_DEFAULT_INFERENCE_CALL_TIMEOUT: float = float(
+    os.environ.get("INFERENCE_CALL_TIMEOUT", "90")
+)
+
 
 def _run_inference_direct(
     *,
@@ -65,6 +73,7 @@ def _run_inference_direct(
     max_tokens: int = 2048,
     json_mode: bool = False,
     timeout: float | None = None,
+    max_retries: int = 1,
 ) -> dict[str, Any]:
     """Run structured inference in-process without dispatching a Celery subtask.
 
@@ -75,7 +84,9 @@ def _run_inference_direct(
     directly, bypassing the broker entirely, while preserving the same
     transient-error retry contract as ``app.tasks.run_structured_inference``
     (up to ``_INFERENCE_MAX_RETRIES`` retries with exponential back-off for
-    connectivity and schema-validation failures).
+    connectivity / timeout failures only; schema-validation failures are NOT
+    retried at the outer level since instructor already exhausts its internal
+    retries before raising).
 
     Parameters
     ----------
@@ -111,6 +122,7 @@ def _run_inference_direct(
                     response_model=response_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    max_retries=max_retries,
                     json_mode=json_mode,
                     timeout=timeout,
                 )
@@ -126,11 +138,16 @@ def _run_inference_direct(
             }
         except RuntimeError as exc:
             error_msg = str(exc)
+            # Only retry transient network/timeout failures at the outer level.
+            # Schema-validation failures are already retried internally by
+            # instructor (via max_retries passed to generate_structured); a
+            # second outer attempt with the same model and prompt almost never
+            # succeeds and wastes wall-clock time, causing T4/Report_Synthesizer
+            # to block far longer than the dc polling window.
             if (
                 "connectivity-failure" in error_msg
                 or "Connection failed" in error_msg
                 or "timed out" in error_msg
-                or "schema-validation-failure" in error_msg
             ):
                 last_exc = exc
                 if attempt < _INFERENCE_MAX_RETRIES:
@@ -149,24 +166,52 @@ def _run_inference_direct(
         except Exception as exc:  # noqa: BLE001
             # Defensive fallback for InstructorRetryException / ValidationError
             # that bypasses generate_structured()'s normalisation layer.
-            exc_name = type(exc).__name__
-            if "InstructorRetryException" in exc_name or "ValidationError" in exc_name:
-                last_exc = exc
-                if attempt < _INFERENCE_MAX_RETRIES:
-                    wait = _INFERENCE_BASE_RETRY_COUNTDOWN * (2 ** attempt)
-                    logger.warning(
-                        "[_run_inference_direct] Structured-output validation failure "
-                        "(attempt %d/%d), retrying in %.1f s: %s",
-                        attempt + 1,
-                        _INFERENCE_MAX_RETRIES + 1,
-                        wait,
-                        exc_name,
-                    )
-                    time.sleep(wait)
-                    continue
+            # Do NOT retry at the outer level — instructor already exhausted its
+            # internal retries; repeating with the same prompt and model is unlikely
+            # to recover and only extends wall-clock time.
             raise
     # All retries exhausted — re-raise the last transient exception.
     raise last_exc  # type: ignore[misc]
+
+
+def _extract_search_query(user_query: str) -> str:
+    """Derive a compact, search-engine-friendly query from a verbose task instruction.
+
+    When the Planner does not supply a ``search_query`` in ``dynamic_params``,
+    the raw user instruction (e.g. ``"Create a detailed report about X.  Use web
+    search..."`` ) would be forwarded to DuckDuckGo as-is, yielding poor results.
+    This helper strips common instructional prefixes and suffixes so that the
+    actual subject entity is extracted and used as the search query.
+
+    Falls back to the original query when no simplification applies.
+    """
+    import re as _re
+
+    # Pattern: "report/summary/analysis/overview about X" — extract X
+    m = _re.search(
+        r"\b(?:report|summary|analysis|overview|information)\s+"
+        r"(?:about|on|regarding|for)\s+(.+?)"
+        r"(?:\.\s|\?\s|$|,?\s*(?:use|using|include|with)\s)",
+        user_query,
+        _re.IGNORECASE,
+    )
+    if m:
+        subject = m.group(1).strip().rstrip(".,'\"")
+        if subject and len(subject) >= 3:
+            return subject
+
+    # Fallback pattern: "about X" anywhere in the query
+    m = _re.search(
+        r"\babout\s+(.+?)(?:\.\s|\?\s|$|,?\s*(?:use|include|with)\s)",
+        user_query,
+        _re.IGNORECASE,
+    )
+    if m:
+        subject = m.group(1).strip().rstrip(".,'\"")
+        if subject and len(subject) >= 3:
+            return subject
+
+    return user_query
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +367,8 @@ class OrchestratorManager:
                     )
                     raise
                 history_id = self._enqueue_and_wait(
-                    node, messages, run_id=run_id, template_meta=tmpl_meta
+                    node, messages, run_id=run_id, template_meta=tmpl_meta,
+                    user_query=user_query,
                 )
                 logger.info(
                     "[manager] task_id=%r completed; history_id=%r",
@@ -471,6 +517,7 @@ class OrchestratorManager:
         *,
         run_id: str,
         template_meta: dict[str, Any] | None = None,
+        user_query: str = "",
     ) -> str | None:
         """Submit *node* to the Celery broker, block until complete, then
         persist the result to the History table.
@@ -482,6 +529,44 @@ class OrchestratorManager:
         logger.info(
             "[manager] Running task_id=%r type=%r", node.task_id, node.task_type
         )
+
+        # Dispatch tools declared by the template before inference so that
+        # research results are injected into the prompt as grounding evidence.
+        _tool_results: list = []
+        _declared_tools: list[str] = (template_meta or {}).get("tools") or []
+        if _declared_tools:
+            from app.services.tool_dispatch import (
+                dispatch_tools,
+                format_tool_results_for_prompt,
+            )
+            # Prefer a template-specific search_query param when present
+            # (e.g. Data_Gatherer uses resolved_params["search_query"]), and
+            # fall back to a cleaned-up version of the user query so that
+            # instructional phrases ("Create a detailed report about ...") are
+            # stripped before the query is sent to DuckDuckGo.
+            _dispatch_query: str = (
+                ((template_meta or {}).get("resolved_params") or {}).get("search_query")
+                or _extract_search_query(user_query)
+            )
+            _tool_results = dispatch_tools(_declared_tools, _dispatch_query)
+            _tool_prompt = format_tool_results_for_prompt(_tool_results)
+            if _tool_prompt:
+                # Embed tool evidence into the first user message (RAG pattern).
+                # External content is placed at user-context trust level — not
+                # system-instruction authority — and does not add a standalone
+                # untrusted message turn.  messages[1] is always the user_query
+                # turn constructed by _build_messages; the guard ensures we never
+                # mutate an unexpected layout.
+                _amended = list(messages)
+                if len(_amended) > 1 and _amended[1]["role"] == "user":
+                    # Place evidence BEFORE the user query so the model reads
+                    # the research context first and grounds its response in it.
+                    _amended[1] = {
+                        "role": "user",
+                        "content": _tool_prompt + "\n\n" + _amended[1]["content"],
+                    }
+                    messages = _amended
+
         # Call inference directly (in-process) rather than dispatching a
         # Celery subtask.  OrchestratorManager runs inside the
         # run_orchestration_pipeline Celery task; Celery forbids blocking on
@@ -493,7 +578,14 @@ class OrchestratorManager:
             temperature=self._temperature,
             max_tokens=self._max_tokens,
             json_mode=self._json_mode,
-            timeout=self._task_timeout,
+            # Cap per-call timeout so a single stalled LLM request does not
+            # hold the task for the full task-level budget (300 s default).
+            timeout=min(self._task_timeout, _DEFAULT_INFERENCE_CALL_TIMEOUT),
+            # Use the same instructor retry budget as the Planner so that small
+            # quantized models (e.g. 2-bit) get enough attempts to produce
+            # valid structured JSON.  The Planner uses max_retries=5 and
+            # succeeds; the default of 1 is too low for Standard tasks.
+            max_retries=5,
         )
         result_dict: dict[str, Any] = task_output["result"]
         progress_dict: dict[str, Any] = task_output.get("progress") or {}
@@ -503,6 +595,10 @@ class OrchestratorManager:
             progress_dict["template_name"] = template_meta.get("template_name")
             progress_dict["resolved_params"] = template_meta.get("resolved_params")
             progress_dict["tools"] = template_meta.get("tools")
+        # Record tool dispatch results (eligibility, status, diagnostics) for
+        # history inspection regardless of whether any results were injected.
+        if _tool_results:
+            progress_dict["tool_results"] = [r.to_dict() for r in _tool_results]
 
         # Cache only the result so children receive compact structured context.
         self._completed_results[node.task_id] = result_dict

@@ -62,6 +62,7 @@ def _run_inference_direct(
     max_tokens: int = 2048,
     json_mode: bool = False,
     timeout: float | None = None,
+    max_retries: int = 1,
 ) -> dict[str, Any]:
     """Run structured inference in-process without dispatching a Celery subtask.
 
@@ -108,6 +109,7 @@ def _run_inference_direct(
                     max_tokens=max_tokens,
                     json_mode=json_mode,
                     timeout=timeout,
+                    max_retries=max_retries,
                 )
             )
             return {
@@ -125,7 +127,6 @@ def _run_inference_direct(
                 "connectivity-failure" in error_msg
                 or "Connection failed" in error_msg
                 or "timed out" in error_msg
-                or "schema-validation-failure" in error_msg
             ):
                 last_exc = exc
                 if attempt < _INFERENCE_MAX_RETRIES:
@@ -141,24 +142,7 @@ def _run_inference_direct(
                     time.sleep(wait)
                     continue
             raise
-        except Exception as exc:  # noqa: BLE001
-            # Defensive fallback for InstructorRetryException / ValidationError
-            # that bypasses generate_structured()'s normalisation layer.
-            exc_name = type(exc).__name__
-            if "InstructorRetryException" in exc_name or "ValidationError" in exc_name:
-                last_exc = exc
-                if attempt < _INFERENCE_MAX_RETRIES:
-                    wait = _INFERENCE_BASE_RETRY_COUNTDOWN * (2 ** attempt)
-                    logger.warning(
-                        "[_run_inference_direct] Structured-output validation failure "
-                        "(attempt %d/%d), retrying in %.1f s: %s",
-                        attempt + 1,
-                        _INFERENCE_MAX_RETRIES + 1,
-                        wait,
-                        exc_name,
-                    )
-                    time.sleep(wait)
-                    continue
+        except Exception:  # noqa: BLE001
             raise
     # All retries exhausted — re-raise the last transient exception.
     raise last_exc  # type: ignore[misc]
@@ -634,6 +618,29 @@ class DebateController:
             user_query=user_query,
             round_num=round_num,
         )
+
+        # Dispatch tools declared by the template before inference.
+        _tool_results_p: list = []
+        _declared_tools_p: list[str] = tmpl_meta.get("tools") or []
+        if _declared_tools_p:
+            from app.services.tool_dispatch import (
+                dispatch_tools,
+                format_tool_results_for_prompt,
+            )
+            _tool_results_p = dispatch_tools(_declared_tools_p, user_query)
+            _tool_prompt_p = format_tool_results_for_prompt(_tool_results_p)
+            if _tool_prompt_p:
+                # Embed tool evidence into the first user message (RAG pattern).
+                # Keeps external content at user-context trust level without
+                # adding a standalone untrusted turn or touching system authority.
+                _amended_p = list(messages)
+                if len(_amended_p) > 1 and _amended_p[1]["role"] == "user":
+                    _amended_p[1] = {
+                        "role": "user",
+                        "content": _amended_p[1]["content"] + "\n\n" + _tool_prompt_p,
+                    }
+                    messages = _amended_p
+
         # Call inference directly (in-process) rather than dispatching a
         # Celery subtask — see _run_inference_direct() docstring.
         task_output: dict[str, Any] = _run_inference_direct(
@@ -644,11 +651,17 @@ class DebateController:
             max_tokens=self._max_tokens,
             json_mode=self._json_mode,
             timeout=self._task_timeout,
+            # Mirror the retry budget used by Standard tasks in manager.py so
+            # that schema-validation failures on small quantized models trigger
+            # instructor retries rather than immediate pipeline failure.
+            max_retries=5,
         )
         progress = task_output.get("progress") or {}
         progress["template_name"] = tmpl_meta.get("template_name")
         progress["resolved_params"] = tmpl_meta.get("resolved_params")
         progress["tools"] = tmpl_meta.get("tools")
+        if _tool_results_p:
+            progress["tool_results"] = [r.to_dict() for r in _tool_results_p]
         return task_output["result"], progress
 
     def _run_mediator(
@@ -676,6 +689,29 @@ class DebateController:
             round_num=round_num,
             forced=forced,
         )
+
+        # Dispatch tools declared by the mediator template before inference.
+        _tool_results_m: list = []
+        _declared_tools_m: list[str] = tmpl_meta.get("tools") or []
+        if _declared_tools_m:
+            from app.services.tool_dispatch import (
+                dispatch_tools,
+                format_tool_results_for_prompt,
+            )
+            _tool_results_m = dispatch_tools(_declared_tools_m, user_query)
+            _tool_prompt_m = format_tool_results_for_prompt(_tool_results_m)
+            if _tool_prompt_m:
+                # Embed tool evidence into the first user message (RAG pattern).
+                # Keeps external content at user-context trust level without
+                # adding a standalone untrusted turn or touching system authority.
+                _amended_m = list(messages)
+                if len(_amended_m) > 1 and _amended_m[1]["role"] == "user":
+                    _amended_m[1] = {
+                        "role": "user",
+                        "content": _amended_m[1]["content"] + "\n\n" + _tool_prompt_m,
+                    }
+                    messages = _amended_m
+
         # Call inference directly (in-process) rather than dispatching a
         # Celery subtask — see _run_inference_direct() docstring.
         task_output: dict[str, Any] = _run_inference_direct(
@@ -686,11 +722,17 @@ class DebateController:
             max_tokens=self._max_tokens,
             json_mode=self._json_mode,
             timeout=self._task_timeout,
+            # Mirror the retry budget used by Standard tasks in manager.py so
+            # that schema-validation failures on small quantized models trigger
+            # instructor retries rather than immediate pipeline failure.
+            max_retries=5,
         )
         progress = task_output.get("progress") or {}
         progress["template_name"] = tmpl_meta.get("template_name")
         progress["resolved_params"] = tmpl_meta.get("resolved_params")
         progress["tools"] = tmpl_meta.get("tools")
+        if _tool_results_m:
+            progress["tool_results"] = [r.to_dict() for r in _tool_results_m]
         return task_output["result"], progress
 
     def _persist_turn(

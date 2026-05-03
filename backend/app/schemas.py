@@ -113,6 +113,25 @@ class ReportSynthesizerResponse(BaseModel):
     details: list[str] = []
 
 
+class DetailedReportResponse(BaseModel):
+    """Richer structured output for synthesis tasks that require multi-section,
+    evidence-grounded final reports.
+
+    Extends the base ``summary / details`` contract with ``sources``
+    (citations / URLs) and ``conclusion`` fields so that ``Report_Synthesizer``
+    produces a substantive, evidence-grounded final report.
+
+    ``details`` and ``conclusion`` are required and must be non-empty so that
+    shallow one-paragraph responses are rejected and trigger instructor's retry
+    budget rather than passing as valid output.
+    """
+
+    summary: str
+    details: list[str] = Field(min_length=1)
+    sources: list[str] = []
+    conclusion: str = Field(min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Planner DAG structured-output schemas
 # ---------------------------------------------------------------------------

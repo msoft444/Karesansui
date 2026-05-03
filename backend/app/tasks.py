@@ -18,6 +18,9 @@ from pydantic import BaseModel
 
 from app.worker import celery_app
 
+# Register tool providers so they are available when orchestrator tasks run.
+import app.services.web_search  # noqa: F401, E402
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -384,7 +387,16 @@ _PLANNER_SYSTEM_PROMPT = (
     "  participants  : non-empty array of role names chosen from: Advocate, Disrupter, Persona_Writer\n"
     "  mediator      : exactly 'Mediator'\n\n"
     "Do NOT include 'role' in Debate tasks. Do NOT include 'participants' or 'mediator' in Standard tasks.\n"
-    "Always end the DAG with a Report_Synthesizer or Persona_Writer task that synthesizes the final answer."
+    "Always end the DAG with a Report_Synthesizer or Persona_Writer task that synthesizes the final answer.\n\n"
+    "RESEARCH-ORIENTED DECOMPOSITION RULE (apply when the query requests a detailed report, "
+    "investigation, evidence-backed analysis, or involves a named entity that may be ambiguous):\n"
+    "  1. ALWAYS start with a Data_Gatherer task (no parent_ids) to collect public-web evidence.\n"
+    "     Set dynamic_params.search_query to the specific entity name + category \n"
+    "     (e.g. 'Meiji Takenoko no Sato chocolate snack') for precise disambiguation.\n"
+    "  2. Follow with Logical_Analyst to interpret the gathered evidence.\n"
+    "  3. Optionally add Critical_Reviewer to challenge unsupported claims.\n"
+    "  4. End with Report_Synthesizer to integrate everything into the final grounded report.\n"
+    "Do NOT collapse a detailed-report request into a single task."
 )
 
 # Settings key names in the GlobalSettings table.
@@ -410,7 +422,7 @@ def _load_settings(db: Any) -> dict[str, Any]:
         _SETTING_TEMPERATURE: 0.0,
         _SETTING_MAX_TOKENS: 2048,
         _SETTING_PLANNER_SYSTEM_PROMPT: _PLANNER_SYSTEM_PROMPT,
-        _SETTING_RESPONSE_MODEL_CLASS_PATH: "app.schemas.ReportSynthesizerResponse",
+        _SETTING_RESPONSE_MODEL_CLASS_PATH: "app.schemas.DetailedReportResponse",
     }
     for key in list(defaults.keys()):
         row = db.get(_GS, key)

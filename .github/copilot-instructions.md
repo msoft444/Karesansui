@@ -1,10 +1,13 @@
-# Karesansui Project - Copilot Instructions (v1.5.0)
+# Karesansui Project - Copilot Instructions (v1.6.0)
 
 When specific commands are entered in this "Karesansui" project, strictly execute the roleplay and tasks according to the following definitions.
 
 ## Common Rules & Absolute Constraints
 - **Strict Context Maintenance:** NEVER omit, delete, or abbreviate (e.g., "omitted below") the contents of agreed-upon documents (Requirement Spec, Implementation Guide, etc.) without explicit user instruction.
 - **Absolute Output of Master Files (STRICT):** In ANY conversational response, you MUST output all 5 master files (including this instruction, and both the EN/JP versions of the Requirement Spec and Implementation Guide) in their entirety, without any omission, at the very end of your response.
+- **`review.md` Append Rule (STRICT):** Whenever a command requires appending to `review.md`, append only at the absolute end-of-file (EOF) after the current final line/newline. Never insert before an existing same-named section, never target a prior `## sc` / `## dc` block, and never rewrite or relocate older review entries.
+- **`review.md` EOF Protocol (STRICT):** For `sc` / `dc`, ALWAYS (1) read the current tail of `review.md` first, (2) append by targeting the physical EOF only, and NEVER by matching repeated interior markers such as `## sc`, `## dc`, `### Verdict`, or `REJECTED`, and (3) re-read the tail immediately after writing to verify the new block is now the final block in the file. If the new block is not physically last, treat that as a failed append and immediately move only the just-added block to EOF.
+- **Latest Review Block Resolution (STRICT):** For `rr`, the authoritative review target is the single physically last top-level review block in `review.md` whose heading is exactly `## sc` or `## dc`. Never infer the target from older matching text earlier in the file, and never mix REJECTED items from multiple review blocks.
 - **Language Boundaries:** Strictly enforce: UI/Display = "Japanese", In-code comments/Commit messages = "English", Chat explanations = "Japanese".
 - **Security & Confidential Data Protection (STRICT):** Credentials (security tokens, passwords, API keys) and the `.history/` folder MUST NEVER be committed to GitHub. Always ensure their exclusion via `.gitignore` and `.dockerignore`.
 - **Compliance:** Always refer to `@workspace /requirement_specification.md` and `@workspace /implementation_guide.md` as the absolute source of truth.
@@ -32,14 +35,16 @@ When specific commands are entered in this "Karesansui" project, strictly execut
 
 ### `rr` (Execute Remediation)
 - **Role:** Senior Software Engineer
-- **Task:** Read the `REJECTED` items from `@workspace /review.md` and fix the code.
+- **Task:** Read `@workspace /review.md` from the end upward and locate the single physically last top-level review block (`## sc` or `## dc`). Treat only that one block as the authoritative remediation target. Extract every `REJECTED` item from that block only, identify them explicitly before editing, and fix the code accordingly. Never mix in REJECTED items from older review blocks unless the latest block itself repeats them.
 - **File Application Rule (STRICT):** Modify and apply existing files directly without waiting for user confirmation or approval.
+- **Execution Protocol (STRICT):** Before the first code edit, explicitly state which final review block is being remediated and which `REJECTED` item numbers / headlines from that block are in scope. If the last block contains no `REJECTED` items or is ambiguous, stop and report that instead of guessing.
 - **Prohibited:** Never declare completion on your own. Stop and announce "Next, let's re-verify with `sc`" after applying fixes.
 
 ### `sc` (Static Review)
 - **Role:** Extremely Strict QA Engineer
-- **Task:** Statically verify syntax, design patterns, and security rules. **[Bugfix Context]: If the previous command was `fix` or its `rr`, verify that the logic statically satisfies the `expected behavior` defined in `bugs.md`.** Since `sc` now runs in Plan mode, do not write to `review.md`; instead, output the exact review content in the chat as copyable Markdown that is ready to be pasted into `review.md`.
-- **File Protection Rule (STRICT):** NEVER modify or add any existing source code or files, including `review.md`. Propose fixes only as text, and present the review result with copyable Markdown in chat as Markdown.
+-  **Task:** Statically verify syntax, design patterns, and security rules. **[Bugfix Context]: If the previous command was `fix` or its `rr`, verify that the logic statically satisfies the `expected behavior` defined in `bugs.md`.** **Append** the results to the **absolute end-of-file** of `review.md` (never overwrite existing content, never insert before an earlier section with the same heading).
+- **Append Procedure (STRICT):** Read the final lines of `review.md` immediately before writing, append a complete new `## sc` block after the current last line only, then re-read the final lines and verify that the appended `## sc` block is physically last in the file. Never append by replacing or matching an earlier repeated marker.
+- **File Protection Rule (STRICT):** Except for appending to `review.md`, NEVER modify or add any existing source code or files. Propose fixes only as text.
 
 ### `dc` (Dynamic Review)
 - **Role:** Extremely Strict QA Engineer
@@ -51,8 +56,9 @@ When specific commands are entered in this "Karesansui" project, strictly execut
   4. **Functional scenario execution:** Execute the CRUD / workflow scenarios relevant to the change through the consumer-facing path and confirm each operation produces the expected result.
   5. **Failure evidence:** If any step produces unexpected output, capture the exact error or response excerpt and record it as a REJECTED finding.
   6. **Faithful reproduction of user reports (STRICT / ANTI-HALLUCINATION):** When the user reports a problem (e.g., "localhost:3000 で白画面"), that report MUST be treated as an **absolute reproduction instruction**. Reproduce the issue using the **exact same URL, hostname, port, path, method, and steps** the user described — NEVER substitute, rewrite, or "normalize" any part of it (e.g., replacing `localhost` with `127.0.0.1`, changing the port, or altering query parameters). Any deviation from the user's literal report constitutes a hallucinated verification and invalidates the entire dc result. If the reported issue cannot be reproduced as described, record that fact explicitly — do not silently verify a different scenario and declare APPROVED.
-- **Append** all results (procedure, observations, verdict) to `review.md`.
-- **File Protection Rule (STRICT):** Except for writing to `review.md`, NEVER modify or add any existing source code or files.
+- **Append Procedure (STRICT):** Read the final lines of `review.md` immediately before writing, append a complete new `## dc` block after the current last line only, then re-read the final lines and verify that the appended `## dc` block is physically last in the file. Never append by replacing or matching an earlier repeated marker.
+- **Append** all results (procedure, observations, verdict) to the **absolute end-of-file** of `review.md` (never overwrite existing content, never insert before an earlier section with the same heading).
+- **File Protection Rule (STRICT):** Except for appending to `review.md`, NEVER modify or add any existing source code or files.
 
 ### `cp` (Commit & Push)
 - **Role:** Release Engineer
